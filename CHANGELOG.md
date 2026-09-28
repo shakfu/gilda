@@ -4,6 +4,12 @@
 
 ### Added
 
+- A trust question per checkout. When the mode is `auto` by default or from `settings.toml`, and the checkout has an `AGENTS.md`, gilda asks once whether to trust it and saves the answer in `state.json`. Declining uses `ask` mode there. A cloned repository could otherwise instruct an agent that runs `bash` unasked. An explicit `--permissions` skips the question, so scripts that set a mode keep working. A run with no one to answer uses `ask` and saves nothing. Embedding apps opt in through `App.Trust` and `App.SetTrust`.
+
+- `bash_env` under `[tools]` names provider key variables that `bash` still receives; see Fixed.
+
+- `--json` reports `"outcome": "truncated"` for an answer cut at `max_tokens`, with exit status 0; `-p` and the REPL print a warning. It was reported as `complete`. A new outcome was chosen over an error so callers that test only the exit status keep working. `agent.Result.Stop` carries the stop reason.
+
 - `settings.toml` sets the limits that trade tokens, time or I/O, in `[agent]`, `[tools]`, `[prompt]` and `[prices]`: output tokens, round-trips, context window, stream resends, tool result size, read lines, bash timeouts, the write preview's read limit, AGENTS.md and skills in the system prompt, and the price list fetch. See Tuning in the README. `--max-tokens`, `--max-turns` and `--context` win over the file. Fixes and safety checks have no switch, since turning one off only brings back its bug. For embedding apps, `tool.Env.Limits`, `agent.Config.StreamRetries` and `agent.Config.OutputCap` take the same values, and `prompt.Build` takes a `prompt.Options`.
 
 - The REPL shows the unified diff of an `edit` or `write` when it asks to approve it; `diff = false` under `[permissions]` in `settings.toml` turns this off. An edit's diff comes from the same code as the edit, so it covers the CRLF rewrite and `replace_all`. A write diffs against the file it replaces, or `/dev/null` for a new file; a binary file or one over 1 MiB gets a one-line summary, since `write` itself never reads the old file. Tools opt in through `tool.Previewer`.
@@ -47,6 +53,18 @@
 
 ### Fixed
 
+- `a` at an approval prompt approved every later call of that tool, secrets and protected paths included, for the rest of the session. It now covers one tool and one kind of reason, such as `edit` outside the working directory, and ends at `/clear` or `/permissions`. It is not offered for a secret or protected path. An edit to `.env` outside the working directory is now reported as a secret, not as outside, so an earlier `a` for outside paths does not cover it.
+
+- `bash` received the provider keys from gilda's environment, so `echo $ANTHROPIC_API_KEY` put the key into the history. It no longer receives any provider's key variables or `GILDA_API_KEY`, unless `bash_env` names them. Key files on disk are still readable.
+
+- Secret and protected patterns were case-sensitive. On macOS's case-insensitive filesystem, `read .ENV` and `write .GIT/hooks/pre-commit` ran without asking. Patterns now ignore case on every platform ([CVE-2014-9390](https://nvd.nist.gov/vuln/detail/CVE-2014-9390)); a false positive costs one prompt.
+
+- Assistant text and reasoning reached the REPL unfiltered. A file holding escape sequences could, through the model's answer, set the window title, write the clipboard (OSC 52) or move the cursor. Control characters and bidirectional overrides now print as escapes; `-p` stdout is unchanged. Approval prompts also escape zero-width characters and bidirectional controls, which made a call display differently from what runs ([CVE-2021-42574](https://nvd.nist.gov/vuln/detail/CVE-2021-42574)).
+
+- `-p` printed the approval label unescaped, so `\r` or an escape sequence in a command could overwrite what the user read before answering. It now prints the call as the REPL does, with its diff.
+
+- `-p` printed a partial answer, then the whole answer after it, when a cut stream was resent. Plain-text stdout now gets each response's text when the response ends. Holding the text was chosen over a marker on stdout, which every consumer would have to parse.
+
 - `--help` printed the value of `GILDA_API_KEY` as the default of `--api-key`. The flag no longer takes its default from the environment; the variable is read after parsing. `--api-key` itself now warns on stderr, since the key shows in the process list and shell history.
 
 - A `write` or `edit` resolved its path twice: once for approval and again when it ran. A symlink swapped while the user decided could redirect it, and an edit could apply to content other than the diff shown. Both tools now resolve the file before approval and write to it through the directory opened then (`tool.Binder`). A call fails if the file or a directory above it was replaced, and an edit also if the content changed. Binding was chosen over re-checking before the run, which resolves the path again and only narrows the gap. `permission.AskFunc` and `App.Preview` take the bound tool, so the preview shows the file the call changes. A write over an existing FIFO or other non-regular file now fails instead of replacing it.
@@ -78,6 +96,8 @@
 - A cost estimate uses the highest long-prompt tier the prompt passes. It took the last matching tier in list order, so a price list with tiers out of order priced a long prompt at a lower tier's rate.
 
 ### Changed
+
+- `permission.AskFunc` takes a `permission.Reason`, whose `Kind` says why the call asks. An app that remembers approvals needs it to avoid remembering one for a secret.
 
 - By default gilda asks before a write outside the working directory, under version-control metadata or to a secret, and before reading a secret. 0.1.0 ran every call. With no one to ask, as under `--json`, such a call is refused. `--permissions all` restores the old behaviour.
 

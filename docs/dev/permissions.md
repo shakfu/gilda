@@ -2,6 +2,10 @@
 
 How gilda's permission modes compare with Antigravity CLI's, and a design for a `bash` sandbox. Written 2026-09-23 against gilda 0.1.0. Nothing below is implemented.
 
+## Priority
+
+Build the sandbox before `[[tools.command]]` ([`tools.md`](tools.md), option B), the diff pager and an MCP client. Some models read through `bash` alone: two GPT self-reviews made 0 `read` calls (`tools.md`). In `auto`, `bash` runs unasked, so for them the secret list guards almost nothing; `cat .env` ran without asking in the review of 2026-09-27. Each further permission rule adds little until `bash` is confined.
+
 ## Antigravity's model
 
 From the Antigravity CLI documentation, `~/.gemini/antigravity-cli/settings.json` (excerpt supplied by the user, not re-checked):
@@ -116,6 +120,7 @@ Landlock rules only add access. A grant on the root cannot exclude `.git` inside
 | `protected` (`.git` ...) | asks | not enforced | enforceable with SBPL `deny` |
 | `secrets` reads | asks | not enforced | enforceable with SBPL `deny` |
 | network | `hosts` for network tools | open | open |
+| provider keys in the environment | not applicable | removed, unless `bash_env` names them | removed, unless `bash_env` names them |
 
 Enforcing `protected` and `secrets` on macOS only makes one setting mean different things per platform. Recommendation: leave them unenforced for `bash` on both, and say so.
 

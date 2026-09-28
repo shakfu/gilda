@@ -112,14 +112,45 @@ func TestRefusalsSayWhy(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "may hold secrets") {
 		t.Fatalf("got %v", err)
 	}
-	asked := ""
-	yes := func(_ context.Context, _ tool.Tool, _ llm.ToolCall, label string) (bool, error) {
-		asked = label
+	asked, kind := "", General
+	yes := func(_ context.Context, _ tool.Tool, _ llm.ToolCall, label string, why Reason) (bool, error) {
+		asked, kind = label, why.Kind
 		return true, nil
 	}
 	ok, err := Approver(Auto, root, yes)(context.Background(), tool.Read{Env: env}, call("read", map[string]string{"path": ".env"}), "read .env")
-	if !ok || err != nil || asked != "read .env" {
-		t.Fatalf("ask: %v %v %q", ok, err, asked)
+	if !ok || err != nil || asked != "read .env" || kind != Secret {
+		t.Fatalf("ask: %v %v %q %d", ok, err, asked, kind)
+	}
+}
+
+// A secret or protected path is reported as such whatever else about the call asks, so an
+// approval remembered for the other reason never covers it.
+func TestSensitiveReasonsWin(t *testing.T) {
+	root, other := t.TempDir(), t.TempDir()
+	env := tool.Env{Root: root}
+	cases := []struct {
+		mode Mode
+		t    tool.Tool
+		path string
+		want Kind
+	}{
+		{Auto, tool.Write{Env: env}, filepath.Join(other, "f.txt"), Outside},
+		{Auto, tool.Write{Env: env}, filepath.Join(other, ".env"), Secret},
+		{Auto, tool.Write{Env: env}, ".git/config", Protected},
+		{Auto, tool.Read{Env: env}, ".env", Secret},
+		{Ask, tool.Write{Env: env}, "main.go", General},
+		{Ask, tool.Write{Env: env}, ".env", Secret},
+		{Ask, tool.Write{Env: env}, ".git/config", Protected},
+	}
+	for _, c := range cases {
+		name := c.t.Spec().Name
+		v, why := Layers(nil).decide(c.mode, root, c.t, call(name, map[string]string{"path": c.path}))
+		if v != askUser || why.Kind != c.want {
+			t.Errorf("%s %s in %s: got %d kind %d (%s), want ask kind %d", name, c.path, c.mode, v, why.Kind, why, c.want)
+		}
+		if why.Lasting() != (c.want != Secret && c.want != Protected) {
+			t.Errorf("%s %s: Lasting() = %v", name, c.path, why.Lasting())
+		}
 	}
 }
 
@@ -292,5 +323,58 @@ func TestDefToolsFollowTheirDeclarations(t *testing.T) {
 		if v != c.want {
 			t.Errorf("%s %s in %s: got %d (%s), want %d", c.t.Spec().Name, c.path, c.mode, v, why, c.want)
 		}
+	}
+}
+
+// On a case-insensitive filesystem .ENV is .env, so patterns ignore case everywhere.
+func TestPatternsIgnoreCase(t *testing.T) {
+	root := t.TempDir()
+	env := tool.Env{Root: root}
+	for _, c := range []struct {
+		t    tool.Tool
+		path string
+		want Kind
+	}{
+		{tool.Read{Env: env}, ".ENV", Secret},
+		{tool.Read{Env: env}, "ID_RSA", Secret},
+		{tool.Write{Env: env}, ".GIT/hooks/pre-commit", Protected},
+		{tool.Write{Env: env}, "sub/.Hg/store", Protected},
+	} {
+		name := c.t.Spec().Name
+		v, why := Layers(nil).decide(Auto, root, c.t, call(name, map[string]string{"path": c.path}))
+		if v != askUser || why.Kind != c.want {
+			t.Errorf("%s %s: got %d (%s)", name, c.path, v, why)
+		}
+	}
+	user := Layers{{Secrets: []string{"*.PEM", "!Public.pem"}, Protected: []string{"Config/Prod"}}}
+	if !user.IsSecret(root, "server.pem") || user.IsSecret(root, "PUBLIC.PEM") {
+		t.Error("user patterns are case-sensitive")
+	}
+	if user.Protects(root, "config/prod/db.yaml") == "" {
+		t.Error("a slashed pattern is case-sensitive")
+	}
+	if Layers(nil).IsSecret(root, ".envrc") {
+		t.Error(".envrc became a secret")
+	}
+}
+
+// Where the filesystem folds case, a path spelled in another case reaches the same file and
+// must be checked as that file.
+func TestCaseInsensitiveFilesystem(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "probe"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "PROBE")); err != nil {
+		t.Skip("filesystem is case-sensitive")
+	}
+	os.WriteFile(filepath.Join(root, ".env"), []byte("K=v"), 0o600)
+	os.MkdirAll(filepath.Join(root, ".git", "hooks"), 0o755)
+	env := tool.Env{Root: root}
+	if v, _ := Layers(nil).decide(Auto, root, tool.Read{Env: env}, call("read", map[string]string{"path": ".ENV"})); v != askUser {
+		t.Error("read .ENV ran without asking")
+	}
+	if v, _ := Layers(nil).decide(Auto, root, tool.Write{Env: env}, call("write", map[string]string{"path": ".GIT/hooks/pre-commit"})); v != askUser {
+		t.Error("write .GIT/hooks/pre-commit ran without asking")
 	}
 }

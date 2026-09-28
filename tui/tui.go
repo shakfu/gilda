@@ -68,6 +68,7 @@ type (
 	approvalMsg struct {
 		call    llm.ToolCall
 		label   string
+		why     permission.Reason
 		preview string // such as a diff; empty when there is none
 		reply   chan bool
 	}
@@ -121,8 +122,11 @@ type model struct {
 	picker *picker
 	// approval is the question waiting for y, n or a.
 	approval *approvalMsg
-	// always holds tools the user allowed for the rest of the session.
-	always  map[string]bool
+	// trust is the directory waiting for y or n; see app.App.Trust.
+	trust string
+	// always holds what the user allowed until /clear or /permissions: a tool, for one kind of
+	// reason. A secret or protected path is never added.
+	always  map[allowance]bool
 	tabIdx  int
 	tabSeed string
 }
@@ -150,7 +154,7 @@ func newModel(ctx context.Context, a *app.App, opts Options) *model {
 		ctx: ctx, app: a, opts: opts, st: st, md: markdown{st: st},
 		width: 80, input: in, hist: hist, histPos: len(hist.Entries),
 		spin: spinner.New(spinner.WithSpinner(spinner.Line), spinner.WithStyle(st.Warn)),
-		busy: "loading", always: map[string]bool{},
+		busy: "loading", always: map[allowance]bool{},
 	}
 	m.sync()
 	return m
@@ -198,6 +202,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.out(m.st.Error.Render("error: " + msg.err.Error()))
 			m.out(m.st.Dim.Render("pick a model with /model, or a provider with /provider"))
 		}
+		if dir, files := m.app.Trust(); dir != "" {
+			m.trust, m.busy = dir, "waiting for an answer"
+			for _, l := range TrustLines(m.st, dir, files) {
+				m.out(l)
+			}
+		}
 		return m, tea.Sequence(m.flush(), m.next())
 
 	case switchedMsg:
@@ -219,7 +229,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Sequence(m.flush(), listen(m.events))
 
 	case approvalMsg:
-		if m.always[msg.call.Name] {
+		if msg.why.Lasting() && m.always[allowance{msg.call.Name, msg.why.Kind}] {
 			msg.reply <- true
 		} else {
 			m.approval = &msg
@@ -243,6 +253,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyPressMsg:
+		if m.trust != "" {
+			return m, m.trustKey(msg)
+		}
 		if m.approval != nil {
 			return m, m.approvalKey(msg)
 		}
@@ -362,10 +375,10 @@ func (m *model) start(text string) tea.Cmd {
 // the answer, or for the run to be cancelled. The preview is made here, off the UI goroutine,
 // since it may read files.
 func askVia(ch chan<- tea.Msg, preview func(tool.Tool, llm.ToolCall) string) permission.AskFunc {
-	return func(ctx context.Context, t tool.Tool, call llm.ToolCall, label string) (bool, error) {
+	return func(ctx context.Context, t tool.Tool, call llm.ToolCall, label string, why permission.Reason) (bool, error) {
 		reply := make(chan bool, 1)
 		select {
-		case ch <- approvalMsg{call: call, label: label, preview: preview(t, call), reply: reply}:
+		case ch <- approvalMsg{call: call, label: label, why: why, preview: preview(t, call), reply: reply}:
 		case <-ctx.Done():
 			return false, ctx.Err()
 		}
@@ -388,8 +401,11 @@ func (m *model) approvalKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "y":
 		answer(true)
 	case "a":
-		m.always[q.call.Name] = true
-		m.out(m.st.Dim.Render("  " + q.call.Name + " allowed for the rest of the session"))
+		if !q.why.Lasting() {
+			break
+		}
+		m.always[allowance{q.call.Name, q.why.Kind}] = true
+		m.out(m.st.Dim.Render("  " + scope(q.call.Name, q.why.Kind) + " allowed until /clear or /permissions"))
 		answer(true)
 	case "n", "esc":
 		answer(false)
@@ -400,6 +416,48 @@ func (m *model) approvalKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	return m.flush()
 }
+
+// allowance is what "a" at an approval prompt remembers.
+type allowance struct {
+	tool string
+	kind permission.Kind
+}
+
+// scope names the calls an allowance covers, such as "edit outside the working directory".
+func scope(name string, k permission.Kind) string {
+	switch k {
+	case permission.Outside:
+		return name + " outside the working directory"
+	case permission.Host:
+		return name + " to unlisted hosts"
+	}
+	return name
+}
+
+func (m *model) trustKey(msg tea.KeyPressMsg) tea.Cmd {
+	var ok bool
+	switch msg.String() {
+	case "y":
+		ok = true
+	case "n", "esc":
+	case "ctrl+c", "ctrl+d":
+		return tea.Quit
+	default:
+		return nil
+	}
+	if err := m.app.SetTrust(m.trust, ok); err != nil {
+		m.out(m.st.Warn.Render("warning: " + err.Error()))
+	}
+	m.trust, m.busy = "", ""
+	if ok {
+		m.out(m.st.Dim.Render("trusted"))
+	} else {
+		m.out(m.st.Dim.Render(distrustNote))
+	}
+	return tea.Sequence(m.flush(), m.next())
+}
+
+const distrustNote = "not trusted, so permissions are ask; /permissions auto changes that for this session"
 
 func listen(ch <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
@@ -421,7 +479,7 @@ func (m *model) event(ev agent.Event) {
 			if i < 0 {
 				break
 			}
-			m.out(m.md.line(m.partial[:i]))
+			m.out(m.md.line(text(m.partial[:i])))
 			m.partial = m.partial[i+1:]
 		}
 	case agent.Reasoning:
@@ -436,7 +494,7 @@ func (m *model) event(ev agent.Event) {
 				break
 			}
 			if l := m.thinking[:i]; strings.TrimSpace(l) != "" {
-				m.out(m.st.Dim.Italic(true).Render("  " + l))
+				m.out(m.st.Dim.Italic(true).Render("  " + text(l)))
 			}
 			m.thinking = m.thinking[i+1:]
 		}
@@ -463,11 +521,11 @@ func (m *model) event(ev agent.Event) {
 // endText flushes a partial line and closes the markdown state at the end of a response.
 func (m *model) endText() {
 	if m.partial != "" {
-		m.out(m.md.line(m.partial))
+		m.out(m.md.line(text(m.partial)))
 		m.partial = ""
 	}
 	if m.thinking != "" && m.showThink {
-		m.out(m.st.Dim.Italic(true).Render("  " + m.thinking))
+		m.out(m.st.Dim.Italic(true).Render("  " + text(m.thinking)))
 	}
 	m.thinking = ""
 	m.md.reset()
@@ -487,6 +545,8 @@ func (m *model) finish(d doneMsg) {
 		m.queue = nil
 	case d.err != nil:
 		m.out(m.st.Error.Render("error: " + d.err.Error()))
+	case d.res.Stop == llm.StopMaxTokens:
+		m.out(m.st.Warn.Render(TruncatedNote))
 	}
 	if d.res.Turns > 0 {
 		m.out(m.st.Dim.Render(usageLine(m.used, m.window, d.res.Usage, m.session)))
@@ -498,6 +558,9 @@ func (m *model) banner(warns []error) {
 		m.st.Dim.Render(m.windowNote()+"  "+shortPath(cwd())+"  permissions: "+string(m.app.Mode())))
 	for _, p := range prompt.AgentsFiles(cwd(), m.app.ConfigDir()) {
 		m.out(m.st.Dim.Render("  instructions: " + shortPath(p)))
+	}
+	if m.app.Distrusted() {
+		m.out(m.st.Dim.Render("  " + distrustNote))
 	}
 	for _, w := range warns {
 		m.out(m.st.Warn.Render("warning: " + w.Error()))
@@ -521,17 +584,24 @@ func (m *model) View() tea.View {
 	var b strings.Builder
 	w := m.width
 	if m.running && m.showThink && m.thinking != "" {
-		b.WriteString(ansi.Hardwrap(m.st.Dim.Italic(true).Render("  "+m.thinking), w, true) + "\n")
+		b.WriteString(ansi.Hardwrap(m.st.Dim.Italic(true).Render("  "+text(m.thinking)), w, true) + "\n")
 	}
 	if m.running && m.partial != "" {
-		b.WriteString(ansi.Hardwrap(m.partial, w, true) + "\n")
+		b.WriteString(ansi.Hardwrap(text(m.partial), w, true) + "\n")
 	}
 	if m.picker != nil {
 		b.WriteString(m.picker.view(m.st, w))
 	}
+	if m.trust != "" {
+		b.WriteString(m.st.Warn.Bold(true).Render("trust this directory?") +
+			m.st.Dim.Render("  y yes | n no, use ask mode | Ctrl-C quit") + "\n")
+	}
 	if q := m.approval; q != nil {
-		b.WriteString(m.st.Warn.Bold(true).Render("allow the "+q.call.Name+" call above?") +
-			m.st.Dim.Render("  y yes | n no | a always for "+q.call.Name+" | Esc no") + "\n")
+		keys := "  y yes | n no | Esc no"
+		if q.why.Lasting() {
+			keys = "  y yes | n no | a always for " + scope(q.call.Name, q.why.Kind) + " | Esc no"
+		}
+		b.WriteString(m.st.Warn.Bold(true).Render("allow the "+q.call.Name+" call above?") + m.st.Dim.Render(keys) + "\n")
 	}
 	b.WriteString(m.st.Dim.Render(strings.Repeat("-", w)) + "\n")
 	b.WriteString(m.input.View() + "\n")

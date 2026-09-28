@@ -98,6 +98,8 @@ type Env struct {
 	Jobs *Jobs
 	// Limits bound the built-in tools; a zero field takes its value in DefaultLimits.
 	Limits Limits
+	// Hide names environment variables bash does not pass on, such as provider keys.
+	Hide []string
 }
 
 // Limits bound what the built-in tools return, read and run. OutputCap, ReadLines and

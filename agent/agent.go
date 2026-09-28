@@ -135,6 +135,9 @@ type Result struct {
 	Text  string
 	Turns int
 	Usage llm.Usage
+	// Stop is the last response's stop reason. StopMaxTokens with a nil error means Text was
+	// cut off at the output limit.
+	Stop llm.StopReason
 }
 
 // Reset starts a new conversation. Session usage is kept.
@@ -208,7 +211,7 @@ func (a *Agent) Run(ctx context.Context, prompt string, emit func(Event)) (Resul
 			}
 		}
 		a.History = append(a.History, msg)
-		res.Text = resp.Message.Text
+		res.Text, res.Stop = resp.Message.Text, resp.Stop
 		emit(Response{Text: resp.Message.Text, Usage: resp.Usage, Stop: resp.Stop})
 
 		// Calls in a cut-off or refused response are answered with this error instead of run.

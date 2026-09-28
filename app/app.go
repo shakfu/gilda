@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -72,9 +74,13 @@ type App struct {
 	opts     Options
 	fixedCtx bool
 	mode     permission.Mode
-	ask      permission.AskFunc
-	rules    []permission.Rules
-	diff     bool
+	// trustDir is the checkout whose AGENTS.md files would instruct auto mode when the mode is
+	// not explicit; see Trust. distrusted is set when the user declined it in an earlier run.
+	trustDir   string
+	distrusted bool
+	ask        permission.AskFunc
+	rules      []permission.Rules
+	diff       bool
 	// fetchPrices is false when settings.toml turns off the price list.
 	fetchPrices bool
 
@@ -123,6 +129,7 @@ func New(opts Options) (*App, error) {
 		return nil, err
 	}
 	// An explicit mode wins over the settings file, which wins over the default.
+	explicit := opts.Permissions != ""
 	if opts.Permissions == "" {
 		opts.Permissions = string(settings.Permissions.Mode)
 	}
@@ -179,7 +186,7 @@ func New(opts Options) (*App, error) {
 	}
 	cfg := agent.Config{
 		System:        prompt.Build(opts.Root, opts.ConfigDir, promptOpts),
-		Tools:         append(tool.Default(tool.Env{Root: opts.Root, Jobs: a.Jobs, Limits: limits}), opts.Tools...),
+		Tools:         append(tool.Default(tool.Env{Root: opts.Root, Jobs: a.Jobs, Limits: limits, Hide: HiddenEnv(st.BashEnv)}), opts.Tools...),
 		MaxTokens:     opts.MaxTokens,
 		MaxTurns:      opts.MaxTurns,
 		StreamRetries: retries,
@@ -192,6 +199,17 @@ func New(opts Options) (*App, error) {
 		return nil, err
 	}
 	a.fixedCtx = opts.Context > 0
+	if !explicit && mode == permission.Auto && !promptOpts.NoAgents {
+		if dir, files := checkout(opts.Root); len(files) > 0 {
+			trusted, answered := a.State.Trust[dir]
+			switch {
+			case !answered:
+				a.trustDir = dir
+			case !trusted:
+				mode, a.distrusted = permission.Ask, true
+			}
+		}
+	}
 	a.mode, a.ask, a.rules = mode, opts.Ask, rules
 	cfg.Approve = permission.Approver(mode, opts.Root, opts.Ask, rules...)
 
@@ -512,6 +530,60 @@ func SplitModel(s string) (string, string, bool) {
 		return "", "", false
 	}
 	return p, m, true
+}
+
+// checkout returns the repository holding root, or root outside one, and the AGENTS.md files
+// it adds to the system prompt.
+func checkout(root string) (string, []string) {
+	dir, err := filepath.Abs(root)
+	if err != nil {
+		return "", nil
+	}
+	if r := prompt.RepoRoot(dir); r != "" {
+		dir = r
+	}
+	return dir, prompt.AgentsFiles(root, "")
+}
+
+// Trust returns a directory whose AGENTS.md files, listed, would instruct an agent that runs
+// bash without asking, when the user has not yet said whether to trust it. It returns "" when
+// no answer is needed: the mode was set explicitly, is not auto, or the directory was answered
+// before. A cloned repository could otherwise direct the agent before the user has read it.
+func (a *App) Trust() (string, []string) {
+	if a.trustDir == "" {
+		return "", nil
+	}
+	_, files := checkout(a.opts.Root)
+	return a.trustDir, files
+}
+
+// SetTrust records the user's answer for dir. Declining switches to ask mode, now and in later
+// runs that do not set a mode explicitly.
+func (a *App) SetTrust(dir string, ok bool) error {
+	a.trustDir = ""
+	if !ok {
+		a.distrusted = true
+		a.SetPermissions(permission.Ask, a.ask)
+	}
+	if a.State.Trust == nil {
+		a.State.Trust = map[string]bool{}
+	}
+	a.State.Trust[dir] = ok
+	return a.State.Save()
+}
+
+// Distrusted reports whether the mode is ask because the user declined to trust the checkout.
+func (a *App) Distrusted() bool { return a.distrusted }
+
+// HiddenEnv lists the variables bash does not receive: every provider's key variables and
+// GILDA_API_KEY, except those named in keep. A command could otherwise print a key into the
+// history, from where it reaches the next provider.
+func HiddenEnv(keep []string) []string {
+	hide := []string{"GILDA_API_KEY"}
+	for _, e := range provider.Registry {
+		hide = append(hide, e.KeyEnv...)
+	}
+	return slices.DeleteFunc(hide, func(name string) bool { return slices.Contains(keep, name) })
 }
 
 func newSessionID() string {

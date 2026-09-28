@@ -62,6 +62,8 @@ type Tools struct {
 	ReadLineBytes  *int `toml:"read_line_bytes"`
 	BashTimeout    *int `toml:"bash_timeout"`
 	BashMaxTimeout *int `toml:"bash_max_timeout"`
+	// BashEnv names provider key variables that bash still receives; see app.HiddenEnv.
+	BashEnv []string `toml:"bash_env"`
 }
 
 // Prompt says what goes into the system prompt besides gilda's own text. Nil means on.
@@ -144,6 +146,11 @@ func (s Settings) validate() error {
 	for _, c := range checks {
 		if c.v != nil && *c.v < c.min {
 			return fmt.Errorf("%s must be at least %d", c.key, c.min)
+		}
+	}
+	for _, name := range s.Tools.BashEnv {
+		if name == "" || strings.ContainsAny(name, "= ") {
+			return fmt.Errorf("tools.bash_env: bad variable name %q", name)
 		}
 	}
 	return nil

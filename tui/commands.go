@@ -60,6 +60,7 @@ func (m *model) command(text string) tea.Cmd {
 	case "/clear":
 		m.app.Agent.Reset()
 		m.used = 0
+		clear(m.always)
 		m.out(m.st.Dim.Render("new conversation"))
 	case "/cost":
 		m.out(m.st.Dim.Render(m.sessionLine()))
@@ -71,6 +72,7 @@ func (m *model) command(text string) tea.Cmd {
 				return nil
 			}
 			m.app.SetPermissions(mode, m.app.Ask())
+			clear(m.always)
 			m.out(m.st.Dim.Render("permissions " + string(mode)))
 			return nil
 		}

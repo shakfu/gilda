@@ -2,7 +2,7 @@
 
 A coding agent for the terminal, and a Go library for building one. It talks to each provider through that provider's own SDK: [anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go), [openai-go](https://github.com/openai/openai-go) and the [OpenRouter Go SDK](https://github.com/OpenRouterTeam/go-sdk).
 
-**IMPORTANT:** by default gilda runs `bash`, and writes inside the working directory, **without asking**. It asks before writes elsewhere and before touching secrets; `--permissions` changes what asks. See [Permissions](#permissions). No mode is a sandbox: whenever `bash` runs, it can read and write anything the user can. Run gilda in a container or a disposable checkout when the prompt or the repository is untrusted.
+**IMPORTANT:** by default gilda runs `bash`, and writes inside the working directory, **without asking**. It asks before writes elsewhere and before touching secrets; `--permissions` changes what asks. In a checkout with an `AGENTS.md`, it first asks whether to trust it. See [Permissions](#permissions). No mode is a sandbox: whenever `bash` runs, it can read and write anything the user can. Run gilda in a container or a disposable checkout when the prompt or the repository is untrusted.
 
 ## Install
 
@@ -81,7 +81,7 @@ Start llama-server with `--jinja` so tool calls work.
 
 - **REPL:** output goes to the terminal's scrollback. An input box and a status bar stay pinned below it. The bar shows the working directory, or a spinner, elapsed time and the current step, then the model, effort, context used and session cost. Assistant text streams as styled markdown, one line at a time. Each tool call gets one line, such as `[tool] read main.go:1-80 -> 80 lines` or `[tool] $ go test -> exit 1: FAIL`. Each prompt ends with a usage line: context, tokens in with the cached share, tokens out, cost.
 
-- **Headless:** `-p` streams the answer to stdout and everything else to stderr. `--json` prints one record per line: `start`, `turn`, `tool_call`, `tool_result` and `retry`, then a final `result` with `outcome`, `text`, `error`, `turns`, `usage` and `context_used`. Exit status 0 when complete, 1 on error, 2 on a usage error, 130 when cancelled.
+- **Headless:** `-p` streams the answer to stdout and everything else to stderr. `--json` prints one record per line: `start`, `turn`, `tool_call`, `tool_result` and `retry`, then a final `result` with `outcome`, `text`, `error`, `turns`, `usage` and `context_used`. `outcome` is `complete`, `truncated` (cut at `max_tokens`), `error` or `cancelled`. Exit status 0 when complete or truncated, 1 on error, 2 on a usage error, 130 when cancelled. Plain-text stdout gets each response's text when the response ends, so a response resent after a cut stream prints once.
 
 - **Network:** a response streams with no overall timeout, so a long answer is never cut off; Esc or Ctrl-C ends a stalled one. When a provider's SDK retries a request, the REPL's status bar and a `[retry] 1 after 503 Service Unavailable` line say why, as do `-p`'s stderr and a `retry` record in `--json`. Anthropic and OpenAI retry up to 4 times, the local providers twice, OpenRouter for up to a minute. A response cut off mid-stream is sent again by gilda itself, up to twice in a row; the cut response never enters the history. `GILDA_LOG=FILE` records each request's endpoint and status and the raw response stream, never request bodies or headers.
 
@@ -122,7 +122,7 @@ The mode sets what runs without asking. The first that is set wins: `--permissio
 | `read-only` | read-only tools; network calls to listed hosts that write no files | nothing | everything else |
 | `all` | everything | nothing | nothing |
 
-The REPL asks inline: `y` allows the call, `n` or Esc declines it, `a` allows that tool for the rest of the session. `-p` asks on the terminal, even with its output redirected. `--json` has no one to ask, so a call that would ask is refused. A declined or refused call goes back to the model with the reason, and the `result` record names the mode as `permissions`.
+The REPL asks inline: `y` allows the call, `n` or Esc declines it. `a` allows later calls of that tool for the same reason, such as `edit` outside the working directory, until `/clear` or `/permissions`. `a` is not offered for a secret or protected path, so the built-in patterns stay in force. `-p` asks on the terminal, even with its output redirected, and shows the call and its diff as the REPL does. `--json` has no one to ask, so a call that would ask is refused. A declined or refused call goes back to the model with the reason, and the `result` record names the mode as `permissions`.
 
 #### What tools declare
 
@@ -156,6 +156,23 @@ Only names that nearly always hold credentials are built in, since a false posit
 - A leading `!` exempts what an earlier pattern in the same source matched; the last match wins, as in `.gitignore`. It cannot exempt a built-in pattern, so `"!.git"` has no effect, nor a pattern an embedding app adds.
 
 - Paths are checked as written and after following symlinks, so a link to `.env` counts as `.env`.
+
+- Case is ignored on every platform: `.ENV` is a secret and `.GIT/hooks` is protected. On a case-insensitive filesystem, such as macOS's default, they are the same files ([CVE-2014-9390](https://nvd.nist.gov/vuln/detail/CVE-2014-9390)).
+
+#### Trust
+
+An `AGENTS.md` in a cloned repository instructs the agent, and `auto` runs `bash` without asking. So when the mode is `auto` by default or from `settings.toml`, gilda asks once per checkout whether to trust its `AGENTS.md` files, and saves the answer in `state.json`. Declining uses `ask` mode there, in this run and later ones. An explicit `--permissions` or `GILDA_PERMISSIONS` skips the question. With no one to answer, as under `--json` or without a terminal, the run uses `ask` and saves nothing.
+
+#### Provider keys
+
+`bash` does not receive the provider key variables, such as `ANTHROPIC_API_KEY`, or `GILDA_API_KEY`. A command could otherwise print a key into the history, which the next request sends to the provider, or to another after `/provider`. `bash_env` names variables to pass on anyway, for example to run a project's integration tests:
+
+```toml
+[tools]
+bash_env = ["OPENAI_API_KEY"]
+```
+
+This removes the cheapest path to a key, not every one: `bash` can still read key files on disk.
 
 #### Allowlists
 
@@ -300,7 +317,7 @@ a := agent.New(agent.Config{
 	Tools:    tool.Default(tool.Env{Root: dir, Jobs: jobs}),
 	// Nil Approve runs every call. permission.Approver builds one from a mode; the ask
 	// function is called only for calls the mode does not settle.
-	Approve: permission.Approver(permission.Auto, dir, func(ctx context.Context, call llm.ToolCall, label string) (bool, error) {
+	Approve: permission.Approver(permission.Auto, dir, func(ctx context.Context, t tool.Tool, call llm.ToolCall, label string, why permission.Reason) (bool, error) {
 		return confirm(label), nil
 	}),
 })
@@ -326,13 +343,13 @@ res, err := a.Run(ctx, "make the tests pass", func(e agent.Event) {
   ```
 - `Options.Rules` adds secrets, protected paths, commands and hosts. The built-in patterns, those in `ConfigDir`'s `settings.toml` and the app's `Options.Rules` are separate layers: a path needs approval when any layer matches it, and a `!` exempts only within its own layer. So an app cannot lift what the user's settings protect. `permission.Builtin()` lists the built-in patterns.
 
-- `Options.Permissions` sets the mode; empty takes `mode` from `ConfigDir`'s `settings.toml`, then `auto`. `Options.Ask` sets how a call that needs approval asks; nil refuses such calls. `SetPermissions` changes either later. The `agent` package alone applies no mode: its `Approve` defaults to running every call.
+- `Options.Permissions` sets the mode; empty takes `mode` from `ConfigDir`'s `settings.toml`, then `auto`. `Options.Ask` sets how a call that needs approval asks; nil refuses such calls. It receives a `permission.Reason`; an app that remembers approvals should do so only where `Reason.Lasting()` holds. `SetPermissions` changes either later. `Trust` and `SetTrust` ask and record the trust question; an app that does not call them is never asked. The `agent` package alone applies no mode: its `Approve` defaults to running every call.
 
 - `Options.Keys` takes vendor keys by provider id and wins over the environment. A GUI app launched from the desktop inherits no shell variables.
 
 - `Options.StateDir`, `CacheDir` and `ConfigDir` keep its state, price list and `AGENTS.md` apart from the CLI's.
 
-- `bash` inherits the process environment. A macOS GUI app's `PATH` lacks Homebrew and toolchain directories, so set `PATH` at startup, for example from `$SHELL -lc 'echo $PATH'`.
+- `bash` inherits the process environment, minus `app.HiddenEnv`: the provider key variables. A macOS GUI app's `PATH` lacks Homebrew and toolchain directories, so set `PATH` at startup, for example from `$SHELL -lc 'echo $PATH'`.
 
 - `Run` blocks, so call it from a goroutine and cancel it through its context. One `Run` at a time per `Agent`; read usage from `Response` events rather than from the `Agent` while a run is in flight.
 

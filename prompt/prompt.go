@@ -74,7 +74,7 @@ func AgentsFiles(dir, configDir string) []string {
 		}
 	}
 	chain := []string{dir}
-	if root := repoRoot(dir); root != "" {
+	if root := RepoRoot(dir); root != "" {
 		chain = nil
 		for d := dir; ; d = filepath.Dir(d) {
 			chain = append(chain, d)
@@ -91,8 +91,8 @@ func AgentsFiles(dir, configDir string) []string {
 	return out
 }
 
-// repoRoot returns the nearest ancestor of dir holding .git, or "".
-func repoRoot(dir string) string {
+// RepoRoot returns the nearest ancestor of dir holding .git, or "".
+func RepoRoot(dir string) string {
 	for d := dir; ; {
 		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
 			return d

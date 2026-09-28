@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -69,6 +70,13 @@ func (b Bash) Run(ctx context.Context, raw json.RawMessage) (Result, error) {
 	out := &capture{limit: l.OutputCap - 1024}
 	cmd := exec.Command("bash", "-c", a.Command)
 	cmd.Dir = b.Root
+	if len(b.Hide) > 0 {
+		// Environ, not os.Environ: it sets PWD to Dir.
+		cmd.Env = slices.DeleteFunc(cmd.Environ(), func(kv string) bool {
+			name, _, _ := strings.Cut(kv, "=")
+			return slices.Contains(b.Hide, name)
+		})
+	}
 	cmd.Stdout, cmd.Stderr = out, out
 	// Its own process group, so a timeout or a cancel kills the whole pipeline.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

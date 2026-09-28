@@ -54,8 +54,40 @@ func Parse(s string) (Mode, error) {
 
 // AskFunc asks the user whether a call may run. t is the tool that will run it, bound when it
 // is a tool.Binder, so a preview should come from t. label is the call as the user sees it,
-// such as "$ go test".
-type AskFunc func(ctx context.Context, t tool.Tool, call llm.ToolCall, label string) (bool, error)
+// such as "$ go test". why says what about the call needs approval.
+type AskFunc func(ctx context.Context, t tool.Tool, call llm.ToolCall, label string, why Reason) (bool, error)
+
+// Kind classifies why a call needs approval.
+type Kind int
+
+const (
+	// General means the mode asks before the tool itself, as ask mode does.
+	General Kind = iota
+	// Outside means a path is outside the working directory.
+	Outside
+	// Undeclared means the tool declares no paths, so it may write anywhere.
+	Undeclared
+	// Host means a network tool contacts a host no layer allows.
+	Host
+	// Protected means a write under a protected path, such as .git.
+	Protected
+	// Secret means a read or write of a secret, such as .env.
+	Secret
+)
+
+// Reason says why a call needs approval or was refused.
+type Reason struct {
+	Kind Kind
+	// Text is for the user and the model, such as "read of .env, which may hold secrets".
+	Text string
+}
+
+func (r Reason) String() string { return r.Text }
+
+// Lasting reports whether an approval may be remembered for later calls of the same tool with
+// the same Kind. Secrets and protected paths are approved one call at a time, since remembering
+// one would lift a built-in rule.
+func (r Reason) Lasting() bool { return r.Kind != Secret && r.Kind != Protected }
 
 // Approver returns the approval function for mode, with root as the working directory. Each
 // Rules is a layer, such as the user's settings and an embedding app's own, added to the
@@ -69,11 +101,11 @@ func Approver(mode Mode, root string, ask AskFunc, rules ...Rules) func(context.
 		case v == run:
 			return true, nil
 		case v == refuse:
-			return false, fmt.Errorf("refused: %s in %s mode", why, mode)
+			return false, fmt.Errorf("refused: %s in %s mode", why.Text, mode)
 		case ask == nil:
-			return false, fmt.Errorf("refused: %s mode asks before %s, and there is no one to ask", mode, why)
+			return false, fmt.Errorf("refused: %s mode asks before %s, and there is no one to ask", mode, why.Text)
 		}
-		return ask(ctx, t, call, label)
+		return ask(ctx, t, call, label, why)
 	}
 }
 
@@ -86,9 +118,9 @@ const (
 )
 
 // decide returns the verdict and, unless the call runs, what about it needs approval.
-func (r Layers) decide(mode Mode, root string, t tool.Tool, call llm.ToolCall) (verdict, string) {
+func (r Layers) decide(mode Mode, root string, t tool.Tool, call llm.ToolCall) (verdict, Reason) {
 	if mode == All {
-		return run, ""
+		return run, Reason{}
 	}
 	name := call.Name
 	paths, perr := declared(t, call)
@@ -99,28 +131,28 @@ func (r Layers) decide(mode Mode, root string, t tool.Tool, call llm.ToolCall) (
 	if ro, ok := t.(tool.ReadOnly); ok && ro.ReadOnly() {
 		for _, p := range paths {
 			if r.IsSecret(root, p) {
-				why := fmt.Sprintf("%s of %s, which may hold secrets", name, filepath.Base(p))
+				why := secretReason(name, p)
 				if mode == ReadOnly {
 					return refuse, why
 				}
 				return askUser, why
 			}
 		}
-		return run, ""
+		return run, Reason{}
 	}
 	_, isBash := t.(tool.Bash)
 	switch mode {
 	case ReadOnly:
-		return refuse, name + ", which can change the environment,"
+		return refuse, Reason{General, name + ", which can change the environment,"}
 	case Ask:
 		if isBash && r.allows(call) {
-			return run, ""
+			return run, Reason{}
 		}
-		return askUser, name
+		return askUser, r.sensitive(root, name, paths, Reason{General, name})
 	}
 	// Auto. bash is recognised by its type, so a custom tool cannot take its policy by name.
 	if isBash {
-		return run, ""
+		return run, Reason{}
 	}
 	return r.writes(root, t, name, paths, perr)
 }
@@ -128,50 +160,72 @@ func (r Layers) decide(mode Mode, root string, t tool.Tool, call llm.ToolCall) (
 // network judges a call by the hosts it contacts, then by the files it writes. A call to
 // listed hosts that writes no files runs in every mode; one that writes files is judged as a
 // modifying tool.
-func (r Layers) network(mode Mode, root string, t tool.Tool, ht tool.Hosts, call llm.ToolCall, paths []string, perr error) (verdict, string) {
+func (r Layers) network(mode Mode, root string, t tool.Tool, ht tool.Hosts, call llm.ToolCall, paths []string, perr error) (verdict, Reason) {
 	name := call.Name
 	hosts, err := ht.Hosts(json.RawMessage(call.Arguments))
 	if err != nil {
 		// The tool rejects invalid arguments; there is nothing to reach.
-		return run, ""
+		return run, Reason{}
 	}
 	if host := r.unlisted(hosts); host != "" {
-		why := fmt.Sprintf("%s to %s, which is not in the hosts allowlist", name, host)
+		why := Reason{Host, fmt.Sprintf("%s to %s, which is not in the hosts allowlist", name, host)}
 		if mode == ReadOnly {
 			return refuse, why
 		}
 		return askUser, why
 	}
 	if _, ok := t.(tool.Paths); ok && perr == nil && len(paths) == 0 {
-		return run, ""
+		return run, Reason{}
 	}
 	switch mode {
 	case ReadOnly:
-		return refuse, name + ", which can write files,"
+		return refuse, Reason{General, name + ", which can write files,"}
 	case Ask:
-		return askUser, name
+		return askUser, r.sensitive(root, name, paths, Reason{General, name})
 	}
 	return r.writes(root, t, name, paths, perr)
 }
 
 // writes judges a modifying call in auto mode by the paths it declares.
-func (r Layers) writes(root string, t tool.Tool, name string, paths []string, perr error) (verdict, string) {
+func (r Layers) writes(root string, t tool.Tool, name string, paths []string, perr error) (verdict, Reason) {
 	if _, ok := t.(tool.Paths); !ok {
-		return askUser, name + ", which declares no paths,"
+		return askUser, Reason{Undeclared, name + ", which declares no paths,"}
 	}
 	if perr != nil {
 		// The tool rejects invalid arguments; there is nothing to confine.
-		return run, ""
+		return run, Reason{}
 	}
+	outside := Reason{}
 	for _, p := range paths {
 		if !Inside(root, p) {
-			return askUser, fmt.Sprintf("%s outside %s", name, root)
-		}
-		if part := r.Protects(root, p); part != "" {
-			return askUser, fmt.Sprintf("%s under %s", name, part)
+			outside = Reason{Outside, fmt.Sprintf("%s outside %s", name, root)}
+			break
 		}
 	}
-	return run, ""
+	// A secret or protected path outranks Outside, whose approval can be remembered.
+	why := r.sensitive(root, name, paths, outside)
+	if why.Text == "" {
+		return run, Reason{}
+	}
+	return askUser, why
+}
+
+// sensitive returns the reason for the first secret or protected path a modifying call names,
+// or def when there is none.
+func (r Layers) sensitive(root, name string, paths []string, def Reason) Reason {
+	for _, p := range paths {
+		if r.IsSecret(root, p) {
+			return secretReason(name, p)
+		}
+		if part := r.Protects(root, p); part != "" {
+			return Reason{Protected, fmt.Sprintf("%s under %s", name, part)}
+		}
+	}
+	return def
+}
+
+func secretReason(name, path string) Reason {
+	return Reason{Secret, fmt.Sprintf("%s of %s, which may hold secrets", name, filepath.Base(path))}
 }
 
 // unlisted returns the first host no layer allows, or "".
@@ -212,7 +266,8 @@ func declared(t tool.Tool, call llm.ToolCall) ([]string, error) {
 //     matching pattern wins, as in .gitignore. It cannot exempt a pattern in another layer,
 //     built-in rules included.
 //
-// Paths are checked as written and after following symlinks; either matching counts.
+// Paths are checked as written and after following symlinks; either matching counts. Case is
+// ignored.
 type Rules struct {
 	// Secrets ask before any read or write, even by a read-only tool.
 	Secrets []string `toml:"secrets"`
@@ -386,18 +441,19 @@ func realRoot(root string) string {
 }
 
 // match applies patterns in order: a slash-less pattern tests names, one with a slash tests
-// paths. The last pattern that matches decides.
+// paths. The last pattern that matches decides. Case is ignored on every platform, since on a
+// case-insensitive filesystem .ENV is .env (CVE-2014-9390); a false positive costs one prompt.
 func match(patterns, names, paths []string) bool {
 	hit := false
 	for _, raw := range patterns {
 		neg := strings.HasPrefix(raw, "!")
-		p := strings.TrimPrefix(raw, "!")
+		p := strings.ToLower(strings.TrimPrefix(raw, "!"))
 		pool := names
 		if strings.Contains(p, "/") {
 			pool = paths
 		}
 		for _, c := range pool {
-			if ok, _ := filepath.Match(p, c); ok {
+			if ok, _ := filepath.Match(p, strings.ToLower(c)); ok {
 				hit = !neg
 				break
 			}

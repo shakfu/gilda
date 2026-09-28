@@ -124,11 +124,12 @@ func ToolLine(st Styles, r agent.ToolResult, width int) string {
 	return line
 }
 
-// ApprovalLines prints the call awaiting approval in full, then its preview, wrapped to width,
-// so what the user approves is exactly what runs. The live prompt below has room for one line.
+// ApprovalLines prints the call awaiting approval in full, then its preview, wrapped to width
+// (0 for none), so what the user approves is exactly what runs. The live prompt below has room
+// for one line.
 func ApprovalLines(st Styles, label, preview string, width int) []string {
 	lines := []string{st.Warn.Bold(true).Render("approve:")}
-	for _, l := range strings.Split(visible(label), "\n") {
+	for _, l := range strings.Split(Visible(label), "\n") {
 		lines = append(lines, ansi.Hardwrap("  "+l, width, true))
 	}
 	if preview == "" {
@@ -136,7 +137,7 @@ func ApprovalLines(st Styles, label, preview string, width int) []string {
 	}
 	for _, l := range strings.Split(strings.TrimSuffix(preview, "\n"), "\n") {
 		// A CRLF file would otherwise end every line with \x0d.
-		l = visible(strings.TrimSuffix(l, "\r"))
+		l = Visible(strings.TrimSuffix(l, "\r"))
 		style := lipgloss.NewStyle()
 		switch {
 		case strings.HasPrefix(l, "+++"), strings.HasPrefix(l, "---"):
@@ -153,9 +154,17 @@ func ApprovalLines(st Styles, label, preview string, width int) []string {
 	return lines
 }
 
-// visible shows control characters other than newline and tab as escapes. Stripping them would
-// hide bytes from the user that the tool still receives; printing them could move the cursor.
-func visible(s string) string {
+// Visible shows control characters other than newline and tab as escapes, and so bidirectional
+// controls and zero-width characters, which make text display differently from what runs. See
+// CVE-2021-42574. Stripping them would hide bytes from the user that the tool still receives.
+func Visible(s string) string { return escape(s, true) }
+
+// text makes model output safe to print: escape sequences could set the window title, write
+// the clipboard or move the cursor. Joiners and direction marks stay, since scripts such as
+// Persian use them in ordinary prose.
+func text(s string) string { return escape(strings.TrimSuffix(s, "\r"), false) }
+
+func escape(s string, strict bool) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {
@@ -163,7 +172,9 @@ func visible(s string) string {
 			b.WriteRune(r)
 		case r < 0x20 || r == 0x7f:
 			fmt.Fprintf(&b, `\x%02x`, r)
-		case r >= 0x80 && r < 0xa0:
+		case r >= 0x80 && r < 0xa0,
+			r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069,
+			strict && (r >= 0x200b && r <= 0x200f || r >= 0x2060 && r <= 0x2064 || r == 0x061c || r == 0xfeff):
 			fmt.Fprintf(&b, `\u%04x`, r)
 		default:
 			b.WriteRune(r)
@@ -171,6 +182,20 @@ func visible(s string) string {
 	}
 	return b.String()
 }
+
+// TrustLines explain the question asked before a checkout's AGENTS.md files may instruct an
+// agent in auto mode.
+func TrustLines(st Styles, dir string, files []string) []string {
+	lines := []string{st.Warn.Bold(true).Render(Visible(dir) + " has instructions for the agent:")}
+	for _, f := range files {
+		lines = append(lines, "  "+Visible(f))
+	}
+	return append(lines, st.Dim.Render("auto mode runs bash and writes inside it without asking; "+
+		"untrusted, gilda asks before each (ask mode)"))
+}
+
+// TruncatedNote follows an answer cut off at the output limit.
+const TruncatedNote = "the answer was cut off at the output limit; raise --max-tokens or max_tokens in settings.toml"
 
 // RetryLine describes a retry, such as "[retry] 2 after 503 Service Unavailable".
 func RetryLine(r agent.Retry) string {

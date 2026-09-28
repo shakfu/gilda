@@ -168,7 +168,7 @@ Make a tool built in when most of these hold:
 
 2. **Document option A now.** It works today at no cost. Add a "using programs on PATH" section to the README with a skill example and the `commands` allowlist.
 
-3. **Build option B if the measurements show `bash` reads and searches that would prompt or be refused.** It reuses `tool.New`, needs no new dependency, and fixes both `read-only` refusing `rg` and the allowlist trusting every flag.
+3. **After the sandbox** ([`permissions.md`](permissions.md#priority)), **build option B if the measurements show `bash` reads and searches that would prompt or be refused.** It reuses `tool.New`, needs no new dependency, and fixes both `read-only` refusing `rg` and the allowlist trusting every flag.
 
 4. **Defer option C** until a server is needed that option B cannot cover. If built, treat every MCP tool as undeclared.
 

@@ -14,6 +14,7 @@ import (
 	"github.com/shakfu/gilda/agent"
 	"github.com/shakfu/gilda/app"
 	"github.com/shakfu/gilda/llm"
+	"github.com/shakfu/gilda/permission"
 	"github.com/shakfu/gilda/tool"
 	"github.com/shakfu/gilda/tui"
 )
@@ -37,7 +38,26 @@ func headless(parent context.Context, a *app.App, prompt string, asJSON, color b
 	// A one-shot run asks on the terminal when it has one. --json output is read by a program,
 	// so a call that needs approval is refused there.
 	if !asJSON {
-		a.SetPermissions("", ttyAsk)
+		a.SetPermissions("", ttyAsk(a.Preview, color))
+	}
+
+	if dir, files := a.Trust(); dir != "" {
+		ok, answered := false, false
+		if !asJSON {
+			ok, answered = ttyTrust(ctx, dir, files, color)
+		}
+		if answered {
+			if err := a.SetTrust(dir, ok); err != nil && !asJSON {
+				fmt.Fprintln(os.Stderr, "gilda: warning:", err)
+			}
+		} else {
+			// Not recorded: nobody answered.
+			a.SetPermissions(permission.Ask, a.Ask())
+			if !asJSON {
+				fmt.Fprintf(os.Stderr, "gilda: %s is not trusted yet, so this run uses ask mode; "+
+					"answer in the REPL, or pass --permissions auto\n", tui.Visible(dir))
+			}
+		}
 	}
 
 	warns, err := a.Prepare(ctx)
@@ -83,6 +103,9 @@ func headless(parent context.Context, a *app.App, prompt string, asJSON, color b
 		if err != nil && !cancelled {
 			fmt.Fprintln(diag, st.Error.Render("error: "+err.Error()))
 		}
+		if truncated(res, err) {
+			fmt.Fprintln(diag, st.Warn.Render(tui.TruncatedNote))
+		}
 	}
 	switch {
 	case cancelled:
@@ -93,26 +116,34 @@ func headless(parent context.Context, a *app.App, prompt string, asJSON, color b
 	return 0
 }
 
+// textEvents prints each round-trip's text when it ends. A stream cut off partway is sent
+// again, so text printed as it streamed would appear twice on stdout.
 func textEvents(out, diag io.Writer, st tui.Styles) func(agent.Event) {
-	atLineStart := true
+	var held strings.Builder
 	return func(e agent.Event) {
 		switch e := e.(type) {
 		case agent.Text:
-			fmt.Fprint(out, e.Text)
-			if e.Text != "" {
-				atLineStart = e.Text[len(e.Text)-1] == '\n'
-			}
+			held.WriteString(e.Text)
 		case agent.Response:
-			if !atLineStart {
-				fmt.Fprintln(out)
-				atLineStart = true
+			if s := held.String(); s != "" {
+				fmt.Fprint(out, s)
+				if !strings.HasSuffix(s, "\n") {
+					fmt.Fprintln(out)
+				}
 			}
+			held.Reset()
 		case agent.ToolResult:
 			fmt.Fprintln(diag, tui.ToolLine(st, e, 0))
 		case agent.Retry:
+			held.Reset()
 			fmt.Fprintln(diag, st.Warn.Render(tui.RetryLine(e)))
 		}
 	}
+}
+
+// truncated reports whether a run ended without error on an answer cut at the output limit.
+func truncated(res agent.Result, err error) bool {
+	return err == nil && res.Stop == llm.StopMaxTokens
 }
 
 type jsonOut struct {
@@ -140,6 +171,8 @@ func (j *jsonOut) result(a *app.App, res agent.Result, err error, cancelled bool
 		outcome = "cancelled"
 	case err != nil:
 		outcome, errText = "error", err.Error()
+	case truncated(res, err):
+		outcome = "truncated"
 	}
 	j.write(map[string]any{
 		"type": "result", "outcome": outcome, "text": res.Text, "error": errText,
@@ -156,14 +189,38 @@ func writeFailure(w io.Writer, err error) int {
 }
 
 // ttyAsk asks on the controlling terminal, so the question reaches the user even when stdout
-// and stderr are redirected. With no terminal the call is refused.
-func ttyAsk(ctx context.Context, _ tool.Tool, _ llm.ToolCall, label string) (bool, error) {
+// and stderr are redirected. It shows the call and its preview as the REPL does. With no
+// terminal the call is refused.
+func ttyAsk(preview func(tool.Tool, llm.ToolCall) string, color bool) permission.AskFunc {
+	return func(ctx context.Context, t tool.Tool, call llm.ToolCall, label string, _ permission.Reason) (bool, error) {
+		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		if err != nil {
+			return false, errors.New("refused: approval needs a terminal, and there is none")
+		}
+		defer tty.Close()
+		lines := tui.ApprovalLines(tui.NewStyles(), label, preview(t, call), 0)
+		return askOn(ctx, tty, tui.Writer(tty, color), lines, "allow this "+call.Name+" call?")
+	}
+}
+
+// ttyTrust asks on the controlling terminal whether to trust dir; answered is false when there
+// is no terminal.
+func ttyTrust(ctx context.Context, dir string, files []string, color bool) (ok, answered bool) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		return false, errors.New("refused: approval needs a terminal, and there is none")
+		return false, false
 	}
 	defer tty.Close()
-	fmt.Fprintf(tty, "gilda: allow %s? [y/N] ", label)
+	ok, err = askOn(ctx, tty, tui.Writer(tty, color), tui.TrustLines(tui.NewStyles(), dir, files), "trust it?")
+	return ok, err == nil
+}
+
+// askOn prints lines to w, asks question, and reads a yes or no from tty.
+func askOn(ctx context.Context, tty io.ReadWriter, w io.Writer, lines []string, question string) (bool, error) {
+	for _, l := range lines {
+		fmt.Fprintln(w, l)
+	}
+	fmt.Fprintf(tty, "gilda: %s [y/N] ", question)
 	answer := make(chan string, 1)
 	go func() {
 		line, _ := bufio.NewReader(tty).ReadString('\n')

@@ -37,7 +37,10 @@ type State struct {
 	Provider string            `json:"provider,omitempty"`
 	Models   map[string]string `json:"models,omitempty"`
 	Effort   string            `json:"effort,omitempty"`
-	dir      string
+	// Trust records, by directory, whether the user let its AGENTS.md files instruct an agent
+	// that runs bash without asking.
+	Trust map[string]bool `json:"trust,omitempty"`
+	dir   string
 }
 
 // Load returns the state saved in dir, or an empty one. An empty dir means StateDir.

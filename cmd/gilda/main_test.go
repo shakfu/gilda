@@ -219,7 +219,7 @@ func TestSettingsAddProtections(t *testing.T) {
 	stdout, _ := gildaWithSettings(t, settings, script, 0, "-p", "go", "--json")
 	for _, want := range []string{
 		"refused: auto mode asks before write under .git",
-		"refused: auto mode asks before write under key.pem",
+		"refused: auto mode asks before write of key.pem, which may hold secrets",
 		`"label":"write ok.txt","name":"write","ok":true`,
 	} {
 		if !strings.Contains(stdout, want) {
@@ -322,5 +322,53 @@ func TestTheUsersGildaVariablesDoNotReachTheBinary(t *testing.T) {
 	}
 	if _, err := os.Stat(os.Getenv("GILDA_LOG")); err == nil {
 		t.Fatal("the user's GILDA_LOG leaked")
+	}
+}
+
+// An answer cut at the output limit exits 0, like a whole one, but says so.
+func TestTruncatedAnswer(t *testing.T) {
+	const cut = `[{"text": "half an ans", "stop": "max_tokens"}]`
+	stdout, _, code := gilda(t, cut, "-p", "go", "--json")
+	if code != 0 || !strings.Contains(stdout, `"outcome":"truncated"`) || !strings.Contains(stdout, `"error":null`) {
+		t.Fatalf("exit %d stdout %q", code, stdout)
+	}
+	stdout, stderr, code := gilda(t, cut, "-p", "go")
+	if code != 0 || stdout != "half an ans\n" || !strings.Contains(stderr, "cut off at the output limit") {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+}
+
+// A stream cut off partway is sent again; stdout holds only the answer that finished.
+func TestResentAnswerPrintsOnce(t *testing.T) {
+	stdout, stderr, code := gilda(t, `[{"text": "The ans", "incomplete": true}, {"text": "The answer."}]`, "-p", "go")
+	if code != 0 || stdout != "The answer.\n" || !strings.Contains(stderr, "[retry] 1") {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+}
+
+// With no one to answer the trust question, a run under an AGENTS.md uses ask mode, and records
+// nothing.
+func TestUntrustedCheckoutUsesAsk(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(dir, "m.json"), []byte(`[{"text":"ok"}]`), 0o644)
+	for mode, want := range map[string]string{"": `"permissions":"ask"`, "auto": `"permissions":"auto"`} {
+		args := []string{"--mock", "m.json", "-p", "go", "--json"}
+		if mode != "" {
+			args = append(args, "--permissions", mode)
+		}
+		cmd := exec.Command(bin, args...)
+		cmd.Dir = dir
+		cmd.Env = testEnv("XDG_STATE_HOME="+dir, "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir)
+		out, err := cmd.Output()
+		if err != nil || !strings.Contains(string(out), want) {
+			t.Errorf("mode %q: %v %s", mode, err, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gilda", "state.json")); err == nil {
+		data, _ := os.ReadFile(filepath.Join(dir, "gilda", "state.json"))
+		if strings.Contains(string(data), "trust") {
+			t.Errorf("an unanswered question was recorded: %s", data)
+		}
 	}
 }

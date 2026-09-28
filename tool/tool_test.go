@@ -579,3 +579,18 @@ func TestBoundCallsRefuseSwaps(t *testing.T) {
 		t.Errorf("file is %q", data)
 	}
 }
+
+// Hidden variables do not reach the command; the rest do, and PWD still names the root.
+func TestBashHidesVariables(t *testing.T) {
+	t.Setenv("GILDA_TEST_KEY", "secret")
+	t.Setenv("GILDA_TEST_KEEP", "kept")
+	e := env(t)
+	e.Hide = []string{"GILDA_TEST_KEY"}
+	res, err := Bash{e}.Run(context.Background(), args(t, map[string]any{"command": `echo "${GILDA_TEST_KEY-unset} $GILDA_TEST_KEEP $PWD"`}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "unset kept " + e.Root; strings.TrimSpace(res.Output) != want {
+		t.Fatalf("got %q, want %q", res.Output, want)
+	}
+}
