@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/shakfu/gilda/agent"
 	"github.com/shakfu/gilda/app"
 	"github.com/shakfu/gilda/llm"
 	"github.com/shakfu/gilda/permission"
@@ -149,5 +151,39 @@ func TestDecliningTrustSwitchesToAsk(t *testing.T) {
 	press(m, "n")
 	if m.trust != "" || a.Mode() != permission.Ask {
 		t.Fatalf("after n: trust %q mode %s", m.trust, a.Mode())
+	}
+}
+
+// The unfinished line was shown raw, then restyled when its newline arrived.
+func TestPartialLineIsStyled(t *testing.T) {
+	m := testModel(t)
+	m.running = true
+	m.event(agent.Text{Text: "- item with `code`"})
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "- item with code") {
+		t.Errorf("partial line not rendered as markdown:\n%s", view)
+	}
+	m.event(agent.Text{Text: "\n```go"})
+	m.View()
+	if m.md.inFence {
+		t.Error("previewing a fence opener changed the markdown state")
+	}
+}
+
+// A held table is shown in the live view and printed when the response ends.
+func TestTableStreams(t *testing.T) {
+	m := testModel(t)
+	m.running = true
+	m.lines = nil
+	m.event(agent.Text{Text: "| a | b |\n|-|-|\n| 1 | 22 |\n"})
+	if len(m.lines) != 0 {
+		t.Fatalf("table printed before it ended: %q", m.lines)
+	}
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "| 1 | 22 |") {
+		t.Errorf("held table missing from view:\n%s", view)
+	}
+	m.endText()
+	if got := ansi.Strip(strings.Join(m.lines, "\n")); got != "| a | b  |\n|---|----|\n| 1 | 22 |" {
+		t.Errorf("got\n%s", got)
 	}
 }

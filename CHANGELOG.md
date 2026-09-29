@@ -4,6 +4,8 @@
 
 ### Added
 
+- The REPL aligns markdown tables and honours `:-:` and `--:` column alignment. A table is held until its last row, since column widths depend on every row; the live view shows it aligned so far. Lines starting with `|` and no separator row print as before.
+
 - A trust question per checkout. When the mode is `auto` by default or from `settings.toml`, and the checkout has an `AGENTS.md`, gilda asks once whether to trust it and saves the answer in `state.json`. Declining uses `ask` mode there. A cloned repository could otherwise instruct an agent that runs `bash` unasked. An explicit `--permissions` skips the question, so scripts that set a mode keep working. A run with no one to answer uses `ask` and saves nothing. Embedding apps opt in through `App.Trust` and `App.SetTrust`.
 
 - `bash_env` under `[tools]` names provider key variables that `bash` still receives; see Fixed.
@@ -52,6 +54,8 @@
 - `go run ./scripts/tally run.jsonl ...` counts tool use in `--json` output per model: calls, failures and output bytes for each tool, with `bash` split by the programs a command runs. See `docs/dev/tools.md`.
 
 ### Fixed
+
+- The REPL showed the line still streaming as raw markdown, then restyled it when its newline arrived. It is now styled as it streams.
 
 - `a` at an approval prompt approved every later call of that tool, secrets and protected paths included, for the rest of the session. It now covers one tool and one kind of reason, such as `edit` outside the working directory, and ends at `/clear` or `/permissions`. It is not offered for a secret or protected path. An edit to `.env` outside the working directory is now reported as a secret, not as outside, so an earlier `a` for outside paths does not cover it.
 

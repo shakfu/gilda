@@ -131,3 +131,38 @@ func TestApprovalColoursTheDiff(t *testing.T) {
 		t.Errorf("CR or trailing blank line shown:\n%q", plain)
 	}
 }
+
+func TestTablesAreAligned(t *testing.T) {
+	md := markdown{st: NewStyles()}
+	var got []string
+	for _, l := range []string{"| a | long header |", "|:-:|--:|", "| `x` | 1 |", "| wide cell | a \\| b |", "after"} {
+		for _, r := range md.add(l) {
+			got = append(got, ansi.Strip(r))
+		}
+	}
+	want := []string{
+		"|     a     | long header |",
+		"|-----------|-------------|",
+		"|     x     |           1 |",
+		"| wide cell |       a | b |",
+		"after",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestPipeLinesWithoutSeparatorPassThrough(t *testing.T) {
+	md := markdown{st: NewStyles()}
+	if out := md.add("| not a table"); out != nil {
+		t.Fatalf("row not held: %q", out)
+	}
+	got := md.flush()
+	if len(got) != 1 || ansi.Strip(got[0]) != "| not a table" {
+		t.Errorf("got %q", got)
+	}
+	md.add("```")
+	if out := md.add("| code |"); len(out) != 1 {
+		t.Errorf("a pipe line inside a fence was held: %q", out)
+	}
+}

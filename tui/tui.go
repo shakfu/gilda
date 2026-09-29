@@ -175,7 +175,7 @@ func (m *model) sync() {
 	m.provider, m.modelID, m.effort, m.window = m.app.ProviderID, ag.Model, ag.Effort, ag.Context
 }
 
-func (m *model) out(line string) { m.lines = append(m.lines, line) }
+func (m *model) out(lines ...string) { m.lines = append(m.lines, lines...) }
 
 // flush prints what this update produced as one block, so its lines stay in order.
 func (m *model) flush() tea.Cmd {
@@ -479,7 +479,7 @@ func (m *model) event(ev agent.Event) {
 			if i < 0 {
 				break
 			}
-			m.out(m.md.line(text(m.partial[:i])))
+			m.out(m.md.add(text(m.partial[:i]))...)
 			m.partial = m.partial[i+1:]
 		}
 	case agent.Reasoning:
@@ -521,9 +521,10 @@ func (m *model) event(ev agent.Event) {
 // endText flushes a partial line and closes the markdown state at the end of a response.
 func (m *model) endText() {
 	if m.partial != "" {
-		m.out(m.md.line(text(m.partial)))
+		m.out(m.md.add(text(m.partial))...)
 		m.partial = ""
 	}
+	m.out(m.md.flush()...)
 	if m.thinking != "" && m.showThink {
 		m.out(m.st.Dim.Italic(true).Render("  " + text(m.thinking)))
 	}
@@ -586,8 +587,14 @@ func (m *model) View() tea.View {
 	if m.running && m.showThink && m.thinking != "" {
 		b.WriteString(ansi.Hardwrap(m.st.Dim.Italic(true).Render("  "+text(m.thinking)), w, true) + "\n")
 	}
-	if m.running && m.partial != "" {
-		b.WriteString(ansi.Hardwrap(text(m.partial), w, true) + "\n")
+	if m.running && (m.partial != "" || len(m.md.table) > 0) {
+		md := m.md // a copy, so the unfinished line does not change the state
+		var ls []string
+		if m.partial != "" {
+			ls = md.add(text(m.partial))
+		}
+		ls = append(ls, md.flush()...)
+		b.WriteString(ansi.Hardwrap(strings.Join(ls, "\n"), w, true) + "\n")
 	}
 	if m.picker != nil {
 		b.WriteString(m.picker.view(m.st, w))
