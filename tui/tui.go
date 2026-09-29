@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -36,15 +37,16 @@ type Options struct {
 
 // Run starts the REPL and returns when the user leaves it.
 func Run(ctx context.Context, a *app.App, opts Options) error {
-	m := newModel(ctx, a, opts)
-	popts := []tea.ProgramOption{tea.WithContext(ctx)}
+	// life ends with the REPL, so a run still sending events stops instead of blocking forever.
+	life, stop := context.WithCancel(ctx)
+	m := newModel(life, a, opts)
+	popts := []tea.ProgramOption{tea.WithContext(life)}
 	if !opts.Color {
 		popts = append(popts, tea.WithColorProfile(colorprofile.Ascii))
 	}
 	_, err := tea.NewProgram(m, popts...).Run()
-	if m.cancel != nil {
-		m.cancel()
-	}
+	stop()
+	m.tasks.wait()
 	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
 		err = nil
 	}
@@ -104,10 +106,13 @@ type model struct {
 	stopped bool
 	cancel  context.CancelFunc
 	events  chan tea.Msg
+	tasks   tasks // goroutines that Run waits for
 	started time.Time
 	queue   []string
 
 	partial   string // assistant text after the last newline
+	reply     string // assistant text of the current response
+	lastReply string // the last response with text, for /copy
 	thinking  string // reasoning after the last newline
 	showThink bool
 	phase     string // what the status bar says during a run
@@ -126,9 +131,10 @@ type model struct {
 	trust string
 	// always holds what the user allowed until /clear or /permissions: a tool, for one kind of
 	// reason. A secret or protected path is never added.
-	always  map[allowance]bool
-	tabIdx  int
-	tabSeed string
+	always map[allowance]bool
+	// Tab cycles through the commands that start with tabSeed; tabLast is the one it set last.
+	tabIdx           int
+	tabSeed, tabLast string
 }
 
 func newModel(ctx context.Context, a *app.App, opts Options) *model {
@@ -151,7 +157,7 @@ func newModel(ctx context.Context, a *app.App, opts Options) *model {
 
 	hist := state.LoadHistory(a.State.Dir())
 	m := &model{
-		ctx: ctx, app: a, opts: opts, st: st, md: markdown{st: st},
+		ctx: ctx, app: a, opts: opts, st: st, md: markdown{st: st, width: 80},
 		width: 80, input: in, hist: hist, histPos: len(hist.Entries),
 		spin: spinner.New(spinner.WithSpinner(spinner.Line), spinner.WithStyle(st.Warn)),
 		busy: "loading", always: map[allowance]bool{},
@@ -162,10 +168,49 @@ func newModel(ctx context.Context, a *app.App, opts Options) *model {
 
 func (m *model) Init() tea.Cmd {
 	a := m.app
-	return tea.Batch(m.spin.Tick, func() tea.Msg {
+	return tea.Batch(m.spin.Tick, m.background(func() tea.Msg {
 		warns, err := a.Prepare(m.ctx)
 		return prepMsg{warns: warns, err: err}
-	})
+	}))
+}
+
+// background runs f as a command that Run waits for.
+func (m *model) background(f func() tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		if !m.tasks.start() {
+			return nil
+		}
+		defer m.tasks.done()
+		return f()
+	}
+}
+
+// tasks counts goroutines that must end before Run returns. Once wait is called, start refuses
+// new ones: Bubble Tea may run a command after the program has quit, and a WaitGroup must not
+// grow during Wait.
+type tasks struct {
+	mu     sync.Mutex
+	wg     sync.WaitGroup
+	closed bool
+}
+
+func (t *tasks) start() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return false
+	}
+	t.wg.Add(1)
+	return true
+}
+
+func (t *tasks) done() { t.wg.Done() }
+
+func (t *tasks) wait() {
+	t.mu.Lock()
+	t.closed = true
+	t.mu.Unlock()
+	t.wg.Wait()
 }
 
 // sync copies what the view shows out of the agent. Call it only while no run or switch is in
@@ -191,6 +236,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = max(msg.Width, 20)
+		m.md.width = m.width
 		m.input.SetWidth(m.width)
 		return m, nil
 
@@ -229,7 +275,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Sequence(m.flush(), listen(m.events))
 
 	case approvalMsg:
-		if msg.why.Lasting() && m.always[allowance{msg.call.Name, msg.why.Kind}] {
+		if m.allowed(msg.call.Name, msg.why) {
 			msg.reply <- true
 		} else {
 			m.approval = &msg
@@ -283,6 +329,7 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			return nil, true
 		}
 		m.input.Reset()
+		m.input.Placeholder = "" // hint only before the first entry
 		m.hist.Add(text)
 		m.histPos, m.draft = len(m.hist.Entries), ""
 		if strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "//") && !strings.Contains(strings.Fields(text)[0][1:], "/") {
@@ -332,6 +379,9 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		}
 	case "tab":
 		return m.complete(), true
+	case "ctrl+r":
+		m.searchHistory()
+		return nil, true
 	}
 	return nil, false
 }
@@ -357,28 +407,47 @@ func (m *model) next() tea.Cmd {
 func (m *model) start(text string) tea.Cmd {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.running, m.stopped, m.started, m.phase = cancel, true, false, time.Now(), "waiting"
+	m.reply = ""
 	m.prompts++
-	ch := make(chan tea.Msg, 256)
+	ch := make(chan tea.Msg, eventBuffer)
 	m.events = ch
 	// Set before the run starts, so the agent goroutine only reads it.
-	m.app.SetPermissions("", askVia(ch, m.app.Preview))
+	m.app.SetPermissions("", askVia(ch, m.app.Preview, m.allowed))
 	ag := m.app.Agent
+	// Sends watch m.ctx, not ctx: Esc cancels ctx, and doneMsg must still arrive.
+	send := func(msg tea.Msg) {
+		select {
+		case ch <- msg:
+		case <-m.ctx.Done():
+		}
+	}
+	if !m.tasks.start() {
+		return nil
+	}
 	go func() {
-		res, err := ag.Run(ctx, text, func(e agent.Event) { ch <- eventMsg{e} })
-		ch <- doneMsg{res, err}
+		defer m.tasks.done()
+		res, err := ag.Run(ctx, text, func(e agent.Event) { send(eventMsg{e}) })
+		send(doneMsg{res, err})
 		close(ch)
 	}()
 	return tea.Batch(listen(ch), m.spin.Tick)
 }
 
+// eventBuffer is how many events a run may send ahead of the UI.
+var eventBuffer = 256
+
 // askVia sends approval questions to the REPL through the run's event channel and waits for
 // the answer, or for the run to be cancelled. The preview is made here, off the UI goroutine,
-// since it may read files.
-func askVia(ch chan<- tea.Msg, preview func(tool.Tool, llm.ToolCall) string) permission.AskFunc {
+// since it may read files, and skipped for a call that allowed says "a" already covers.
+func askVia(ch chan<- tea.Msg, preview func(tool.Tool, llm.ToolCall) string, allowed func(string, permission.Reason) bool) permission.AskFunc {
 	return func(ctx context.Context, t tool.Tool, call llm.ToolCall, label string, why permission.Reason) (bool, error) {
+		var p string
+		if !allowed(call.Name, why) {
+			p = preview(t, call)
+		}
 		reply := make(chan bool, 1)
 		select {
-		case ch <- approvalMsg{call: call, label: label, why: why, preview: preview(t, call), reply: reply}:
+		case ch <- approvalMsg{call: call, label: label, why: why, preview: p, reply: reply}:
 		case <-ctx.Done():
 			return false, ctx.Err()
 		}
@@ -415,6 +484,12 @@ func (m *model) approvalKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.cancel()
 	}
 	return m.flush()
+}
+
+// allowed reports whether an earlier "a" covers a call. The agent goroutine calls it too. That is
+// safe because always changes only while the agent waits for an approval or no run is active.
+func (m *model) allowed(name string, why permission.Reason) bool {
+	return why.Lasting() && m.always[allowance{name, why.Kind}]
 }
 
 // allowance is what "a" at an approval prompt remembers.
@@ -474,6 +549,7 @@ func (m *model) event(ev agent.Event) {
 	case agent.Text:
 		m.phase = "writing"
 		m.partial += e.Text
+		m.reply += e.Text
 		for {
 			i := strings.IndexByte(m.partial, '\n')
 			if i < 0 {
@@ -512,6 +588,10 @@ func (m *model) event(ev agent.Event) {
 		m.phase = "waiting"
 	case agent.Response:
 		m.endText()
+		if strings.TrimSpace(m.reply) != "" {
+			m.lastReply = m.reply
+		}
+		m.reply = ""
 		m.app.Remember()
 		m.session.Add(e.Usage)
 		m.used = e.Usage.Input + e.Usage.Output
@@ -555,8 +635,8 @@ func (m *model) finish(d doneMsg) {
 
 func (m *model) banner(warns []error) {
 	m.out(m.st.Banner.Render("gilda "+m.opts.Version) + "  " + m.st.Model.Render(m.provider+"/"+shortModel(m.modelID)) +
-		m.st.Dim.Render(m.windowNote()+"  "+shortPath(cwd())+"  permissions: "+string(m.app.Mode())))
-	for _, p := range prompt.AgentsFiles(cwd(), m.app.ConfigDir()) {
+		m.st.Dim.Render(m.windowNote()+"  "+shortPath(m.app.Root())+"  permissions: "+string(m.app.Mode())))
+	for _, p := range prompt.AgentsFiles(m.app.Root(), m.app.ConfigDir()) {
 		m.out(m.st.Dim.Render("  instructions: " + shortPath(p)))
 	}
 	if m.app.Distrusted() {
@@ -603,6 +683,9 @@ func (m *model) View() tea.View {
 		}
 		b.WriteString(m.st.Warn.Bold(true).Render("allow the "+q.call.Name+" call above?") + m.st.Dim.Render(keys) + "\n")
 	}
+	for _, q := range m.queue {
+		b.WriteString(m.st.Dim.Render(ansi.Truncate("queued: "+oneLine(q), w, "...")) + "\n")
+	}
 	b.WriteString(m.st.Dim.Render(strings.Repeat("-", w)) + "\n")
 	b.WriteString(m.input.View() + "\n")
 	b.WriteString(m.statusBar())
@@ -618,26 +701,67 @@ func (m *model) statusBar() string {
 	case m.busy != "":
 		left = m.st.BarBusy.Render(m.spin.View() + " " + m.busy)
 	default:
-		left = m.st.BarLeft.Render(shortPath(cwd()))
+		left = m.st.BarLeft.Render(shortPath(m.app.Root()))
 	}
 	if n := len(m.queue); n > 0 {
 		left += m.st.BarLeft.Render(fmt.Sprintf("%d queued", n))
 	}
-	right := m.st.BarModel.Render(m.provider + "/" + shortModel(m.modelID))
+	// A narrow terminal drops cost, effort and ctx, in that order, then cuts the model id, then
+	// drops the mode. The mode goes last, since it says what runs unasked.
+	type seg struct {
+		s    string
+		drop int
+	}
+	var segs []seg
 	if m.effort != "" {
-		right += m.st.BarLeft.Render(m.effort)
+		segs = append(segs, seg{m.st.BarLeft.Render(m.effort), 3})
 	}
 	if mode := m.app.Mode(); mode != permission.Auto {
-		right += m.st.BarBusy.Render(string(mode))
+		segs = append(segs, seg{m.st.BarBusy.Render(string(mode)), 1})
 	}
 	ctx := "ctx " + shortTokens(m.used)
 	if m.window > 0 {
 		ctx = fmt.Sprintf("ctx %d%%", m.used*100/m.window)
 	}
-	right += m.st.BarCtx.Render(ctx)
-	if m.session.Cost != nil {
-		right += m.st.BarCost.Render(money(m.session.Cost, m.session.Estimated))
+	ctxStyle := m.st.BarCtx
+	if m.window > 0 && m.used*100/m.window >= ctxWarn {
+		ctx, ctxStyle = ctx+"!", m.st.BarWarn
 	}
+	segs = append(segs, seg{ctxStyle.Render(ctx), 2})
+	if m.session.Cost != nil {
+		segs = append(segs, seg{m.st.BarCost.Render(money(m.session.Cost, m.session.Estimated)), 4})
+	}
+	id := m.provider + "/" + shortModel(m.modelID)
+	// room keeps a few columns of the left side, so a run's spinner stays visible.
+	room := m.width - min(lipgloss.Width(left), barLeftMin)
+	rest := func() int {
+		n := 0
+		for _, g := range segs {
+			n += lipgloss.Width(g.s)
+		}
+		return n
+	}
+	for len(segs) > 0 {
+		i := 0
+		for j, g := range segs {
+			if g.drop > segs[i].drop {
+				i = j
+			}
+		}
+		need := lipgloss.Width(id) + 2 + rest()
+		if segs[i].drop == 1 {
+			need = barModelMin + 2 + rest() // the model id is cut before the mode goes
+		}
+		if need <= room {
+			break
+		}
+		segs = append(segs[:i], segs[i+1:]...)
+	}
+	right := m.st.BarModel.Render(ansi.Truncate(id, max(room-2-rest(), 1), "~"))
+	for _, g := range segs {
+		right += g.s
+	}
+	right = ansi.Truncate(right, max(room, 0), "")
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
@@ -647,15 +771,19 @@ func (m *model) statusBar() string {
 	return left + m.st.BarFill.Render(strings.Repeat(" ", max(gap, 0))) + right
 }
 
+// barLeftMin is the width of the status bar's left side that the right side cannot take.
+const barLeftMin = 12
+
+// ctxWarn is the context use, in percent, that the status bar flags with "!" and colour.
+const ctxWarn = 85
+
+// barModelMin is how much of the model id the status bar keeps before it drops the mode.
+const barModelMin = 12
+
 // shortModel drops the directory from a model id that is a file path, as llama-server reports.
 func shortModel(id string) string {
 	if strings.HasPrefix(id, "/") {
 		return filepath.Base(id)
 	}
 	return id
-}
-
-func cwd() string {
-	d, _ := os.Getwd()
-	return d
 }

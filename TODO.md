@@ -28,9 +28,9 @@ None open.
 
 - [ ] **F5** (low). `tool.Bash` panics when `Limits.OutputCap` < 1024 (`tool/bash.go:69`); the panic is in an `os/exec` goroutine and cannot be recovered. Fix: apply the 4096 minimum from `state/settings.go:137` in `Env.limits()`.
 
-- [ ] The TUI's agent goroutine sends on the event channel with no way out. If the TUI exits while the buffer is full, the goroutine blocks forever. Every send must also watch a context that lives as long as the TUI, not the per-prompt one, because Esc cancels that one and `doneMsg` must still be delivered.
+- [x] The TUI's agent goroutine sends on the event channel with no way out. If the TUI exits while the buffer is full, the goroutine blocks forever. Every send must also watch a context that lives as long as the TUI, not the per-prompt one, because Esc cancels that one and `doneMsg` must still be delivered.
 
-- [ ] The TUI's background commands, `Prepare` (`tui/tui.go:161`) and the model list (`fetchModels`, `tui/commands.go:143`), run on `m.ctx`, the caller's context. `tui.Run` does not cancel it on exit and waits for none of them, so an embedding app can have network calls still running after the REPL closes. Give them a context that `Run` cancels, and wait for them before returning.
+- [x] The TUI's background commands, `Prepare` (`tui/tui.go:161`) and the model list (`fetchModels`, `tui/commands.go:143`), ran on the caller's context, which `tui.Run` neither cancelled nor waited for, so an embedding app could have network calls still running after the REPL closed.
 
 ### Permissions follow-ups
 
@@ -56,7 +56,7 @@ Done: `edit` and `write`, on by default, off with `diff = false` in `settings.to
 
 - [ ] Decide whether `diff` stays on by default after trying it.
 
-- [ ] `askVia` computes the preview before the TUI checks "always allow", so a call allowed with `a` still reads its file once for a preview nobody sees.
+- [x] `askVia` computes the preview before the TUI checks "always allow", so a call allowed with `a` still reads its file once for a preview nobody sees.
 
 - [ ] Full-diff pager.
 
@@ -81,11 +81,19 @@ See `docs/dev/tools.md`.
 ### Minor findings
 
 - [ ] **m2**: `-P ollama` with the default endpoint still fetches OpenRouter's price list (`app/app.go:248`).
-- [ ] **m6**: REPL banner and status bar use `os.Getwd()`, not `Options.Root` (`tui/tui.go:498`, `:551`, `:588`).
+- [x] **m6**: REPL banner and status bar use `os.Getwd()`, not `Options.Root` (`tui/tui.go:498`, `:551`, `:588`).
 - [ ] **m7**: `llm.HTTPClient` and the `SetLog` writer are package globals (`llm/retry.go:46`, `:121`).
-- [ ] **m8**: `/help` omits secrets and protected paths from the `auto` description (`tui/commands.go:58`).
+- [x] **m8**: `/help` omits secrets and protected paths from the `auto` description (`tui/commands.go:58`).
 - [ ] **m9**: `version` defaults to `0.1.0` despite Unreleased behaviour changes and the module rename (`cmd/gilda/main.go:26`).
 - [ ] **m10**: `docs/dev/design.md:18` cites myra's `docs/dev/native-providers.md` with no link.
+
+### REPL
+
+From the TUI review of 2026-09-29.
+
+- [ ] `/export` (transcript to a file) and `/compact` (summarise older turns under context pressure). Design both on the same saved-conversation format as session resume, so neither needs redoing if resume is built.
+- [ ] `model.allowed` reads the `always` map from the agent goroutine without a lock (`tui/tui.go`). This is safe only while tool calls run one at a time. Add a mutex if the agent starts running them in parallel.
+- [ ] The `drive` test helper (`tui/commands_test.go`) reads `tea.Println`'s unexported `messageBody` field by reflection. Recheck it on a Bubble Tea upgrade.
 
 ### Deferred
 

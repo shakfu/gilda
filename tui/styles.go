@@ -24,6 +24,7 @@ type Styles struct {
 	Tool                                                 map[string]lipgloss.Style
 	Heading, Bold, Italic, Code, CodeBlock, Link, Quote  lipgloss.Style
 	BarLeft, BarModel, BarCtx, BarCost, BarFill, BarBusy lipgloss.Style
+	BarWarn                                              lipgloss.Style
 	Selected, Match                                      lipgloss.Style
 }
 
@@ -72,6 +73,7 @@ func NewStyles() Styles {
 		BarCost:   bar("16", "150"),
 		BarFill:   lipgloss.NewStyle().Background(lipgloss.Color("236")),
 		BarBusy:   bar("16", "221").Bold(true),
+		BarWarn:   bar("231", "160").Bold(true),
 		Selected:  s("231").Background(lipgloss.Color("97")).Bold(true),
 		Match:     s("252"),
 	}

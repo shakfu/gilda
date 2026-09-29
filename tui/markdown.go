@@ -3,13 +3,17 @@ package tui
 import (
 	"regexp"
 	"strings"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // markdown styles assistant text one complete line at a time, so it can render a stream as it
 // arrives. Only fences carry state between lines. Tables pass through unchanged: they are
-// already aligned in a monospace terminal.
+// already aligned in a monospace terminal. A row wider than width loses its cell padding
+// instead, since a wrapped aligned row is harder to read than an unaligned one.
 type markdown struct {
 	st      Styles
+	width   int
 	inFence bool
 	fence   string
 }
@@ -21,7 +25,8 @@ var (
 	rule     = regexp.MustCompile(`^\s*(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$`)
 	fenceRe  = regexp.MustCompile("^\\s*(```+|~~~+)(.*)$")
 
-	inlineCode = regexp.MustCompile("`([^`]+)`")
+	inlineCode = regexp.MustCompile("``\\s?(.+?)\\s?``|`([^`]+)`")
+	task       = regexp.MustCompile(`^\[([ xX])\]\s+(.*)$`)
 	boldRe     = regexp.MustCompile(`\*\*([^*]+)\*\*|__([^_]+)__`)
 	italicRe   = regexp.MustCompile(`(^|[^*\w])\*([^*\s][^*]*)\*|(^|[^_\w])_([^_\s][^_]*)_`)
 	linkRe     = regexp.MustCompile(`\[([^\]]+)\]\(([^)\s]+)\)`)
@@ -52,7 +57,17 @@ func (m *markdown) line(s string) string {
 	case strings.HasPrefix(s, ">"):
 		return m.st.Dim.Render("| ") + m.st.Quote.Render(strings.TrimSpace(strings.TrimPrefix(s, ">")))
 	}
+	if strings.HasPrefix(strings.TrimSpace(s), "|") && m.width > 0 && ansi.StringWidth(s) > m.width {
+		return compactRow(s)
+	}
 	if b := bullet.FindStringSubmatch(s); b != nil {
+		if t := task.FindStringSubmatch(b[2]); t != nil {
+			box := m.st.Dim.Render("[ ]")
+			if t[1] != " " {
+				box = m.st.OK.Render("[x]")
+			}
+			return b[1] + m.st.Accent.Render("-") + " " + box + " " + m.inline(t[2])
+		}
 		return b[1] + m.st.Accent.Render("-") + " " + m.inline(b[2])
 	}
 	if n := numbered.FindStringSubmatch(s); n != nil {
@@ -72,7 +87,11 @@ func (m *markdown) inline(s string) string {
 			return b.String()
 		}
 		b.WriteString(m.emphasis(s[:loc[0]]))
-		b.WriteString(m.st.Code.Render(s[loc[2]:loc[3]]))
+		if loc[2] >= 0 {
+			b.WriteString(m.st.Code.Render(s[loc[2]:loc[3]]))
+		} else {
+			b.WriteString(m.st.Code.Render(s[loc[4]:loc[5]]))
+		}
 		s = s[loc[1]:]
 	}
 }
@@ -98,5 +117,18 @@ func (m *markdown) emphasis(s string) string {
 // stripInline drops emphasis markers inside a heading, which is already bold.
 func stripInline(s string) string {
 	s = boldRe.ReplaceAllString(s, "$1$2")
-	return inlineCode.ReplaceAllString(s, "$1")
+	return inlineCode.ReplaceAllString(s, "$1$2")
+}
+
+// compactRow trims the padding around each cell of a table row. An escaped pipe stays in its
+// cell.
+func compactRow(s string) string {
+	cells := strings.Split(strings.ReplaceAll(strings.TrimSpace(s), `\|`, "\x00"), "|")
+	for i, c := range cells {
+		cells[i] = strings.TrimSpace(c)
+		if strings.Trim(cells[i], ":-") == "" && strings.Contains(cells[i], "---") {
+			cells[i] = strings.Replace(cells[i], strings.Trim(cells[i], ":"), "---", 1)
+		}
+	}
+	return strings.ReplaceAll(strings.TrimSpace(strings.Join(cells, " | ")), "\x00", `\|`)
 }

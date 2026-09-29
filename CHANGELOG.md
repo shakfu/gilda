@@ -4,6 +4,8 @@
 
 ### Added
 
+- REPL: Ctrl-R searches earlier prompts in a picker and puts the choice in the input, unsent. `/copy` sends the last answer to the clipboard through the terminal (OSC 52), which also works over SSH; a terminal without OSC 52 support ignores it.
+
 - A trust question per checkout. When the mode is `auto` by default or from `settings.toml`, and the checkout has an `AGENTS.md`, gilda asks once whether to trust it and saves the answer in `state.json`. Declining uses `ask` mode there. A cloned repository could otherwise instruct an agent that runs `bash` unasked. An explicit `--permissions` skips the question, so scripts that set a mode keep working. A run with no one to answer uses `ask` and saves nothing. Embedding apps opt in through `App.Trust` and `App.SetTrust`.
 
 - `bash_env` under `[tools]` names provider key variables that `bash` still receives; see Fixed.
@@ -53,6 +55,26 @@
 
 ### Fixed
 
+- Tab after a paste kept cycling through the commands matching the text before it, since only a key press reset the cycle. It now restarts whenever the input differs from its last completion.
+
+- A markdown table row wider than the terminal wrapped mid-cell. It now drops its cell padding first; nothing is cut. Task-list boxes (`- [ ]`, `- [x]`) are styled, and a double-backtick code span such as ``` ``a`b`` ``` is parsed.
+
+- The REPL banner and status bar showed the process's working directory, not `app.Options.Root`, so an embedding app with another root showed the wrong one. `App.Root` exposes it.
+
+- `/help` described `auto` without its secret and protected-path rules. It now states them, and that `a` never covers them.
+
+- Backspace in a REPL picker removed one byte, so deleting a non-ASCII character left invalid UTF-8 in the filter. It now removes one character. Pickers also take PgUp, PgDn, Home, End, and Ctrl-U to clear the filter.
+
+- A call already allowed with `a` still read its file for a diff nobody saw. The REPL now skips the preview for it.
+
+- `tui.Run` now waits for its startup, model-list and switch requests before returning, as it does for the agent. An embedding app no longer has them running after the REPL closes.
+
+- The REPL status bar overflowed and wrapped below about 60 columns, which moved the input box on every keystroke. Only the left side was cut to fit. A narrow bar now drops cost, effort and context use, then cuts the model id, then drops the permission mode. The mode goes last because it says what runs unasked.
+
+- Leaving the REPL mid-turn could leave the agent goroutine blocked forever on a full event channel. Its sends now also stop when `tui.Run` returns, and `Run` waits for it. The per-prompt context was not enough: Esc cancels it, and the final result must still arrive.
+
+- The REPL input showed its key-binding hint on every empty prompt. It now shows only before the first entry.
+
 - `a` at an approval prompt approved every later call of that tool, secrets and protected paths included, for the rest of the session. It now covers one tool and one kind of reason, such as `edit` outside the working directory, and ends at `/clear` or `/permissions`. It is not offered for a secret or protected path. An edit to `.env` outside the working directory is now reported as a secret, not as outside, so an earlier `a` for outside paths does not cover it.
 
 - `bash` received the provider keys from gilda's environment, so `echo $ANTHROPIC_API_KEY` put the key into the history. It no longer receives any provider's key variables or `GILDA_API_KEY`, unless `bash_env` names them. Key files on disk are still readable.
@@ -96,6 +118,8 @@
 - A cost estimate uses the highest long-prompt tier the prompt passes. It took the last matching tier in list order, so a price list with tiers out of order priced a long prompt at a lower tier's rate.
 
 ### Changed
+
+- The REPL status bar marks context use at 85% or more with `!` and a red background. Queued prompts are listed above the input, not only counted. Enter in a picker with no matches keeps it open.
 
 - `permission.AskFunc` takes a `permission.Reason`, whose `Kind` says why the call asks. An app that remembers approvals needs it to avoid remembering one for a secret.
 

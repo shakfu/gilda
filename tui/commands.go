@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -25,6 +26,7 @@ var commands = []command{
 	{"/thinking", "", "show or hide reasoning as it streams"},
 	{"/clear", "", "start a new conversation; session cost is kept"},
 	{"/cost", "", "session tokens and cost"},
+	{"/copy", "", "copy the last answer to the clipboard"},
 	{"/help", "", "list commands and keys"},
 	{"/exit", "", "leave; so do /quit, Ctrl-D, and Ctrl-C on an empty line"},
 }
@@ -53,10 +55,15 @@ func (m *model) command(text string) tea.Cmd {
 			m.out("  " + m.st.Accent.Render(fmt.Sprintf("%-13s", c.name)) + m.st.Dim.Render(fmt.Sprintf("%-9s", c.args)) + c.help)
 		}
 		m.out(m.st.Dim.Render("  Enter sends | Shift-Enter, Alt-Enter or Ctrl-J adds a line | Up/Down history"))
+		m.out(m.st.Dim.Render("  Ctrl-R searches history"))
 		m.out(m.st.Dim.Render("  Tab completes | Esc cancels a turn | typing during a turn queues the next prompt"))
+		m.out(m.st.Dim.Render("  in a picker: PgUp/PgDn/Home/End move, Ctrl-U clears the filter"))
 		m.out(m.st.Dim.Render("  model ids take a provider prefix to switch both: /model openrouter:openai/gpt-5.5"))
-		m.out(m.st.Dim.Render("  permissions: auto asks before write/edit outside the working directory; ask asks"))
-		m.out(m.st.Dim.Render("  before every call but read; all never asks; read-only refuses all but read"))
+		m.out(m.st.Dim.Render("  permissions: auto asks before write/edit outside the working directory, under a"))
+		m.out(m.st.Dim.Render("  protected path such as .git, or of a secret such as .env; ask asks before every"))
+		m.out(m.st.Dim.Render("  call but read; all never asks; read-only refuses all but read. Reading a secret"))
+		m.out(m.st.Dim.Render("  asks in auto and ask and is refused in read-only. a at a prompt never covers"))
+		m.out(m.st.Dim.Render("  secrets or protected paths"))
 	case "/clear":
 		m.app.Agent.Reset()
 		m.used = 0
@@ -64,6 +71,14 @@ func (m *model) command(text string) tea.Cmd {
 		m.out(m.st.Dim.Render("new conversation"))
 	case "/cost":
 		m.out(m.st.Dim.Render(m.sessionLine()))
+	case "/copy":
+		if m.lastReply == "" {
+			m.out(m.st.Dim.Render("no answer to copy yet"))
+			return nil
+		}
+		// OSC 52 reaches the local clipboard over SSH too, but a terminal may ignore it silently.
+		m.out(m.st.Dim.Render(fmt.Sprintf("sent %d characters to the terminal's clipboard", utf8.RuneCountInString(m.lastReply))))
+		return tea.SetClipboard(m.lastReply)
 	case "/permissions":
 		set := func(s string) tea.Cmd {
 			mode, err := permission.Parse(s)
@@ -137,18 +152,18 @@ func (m *model) setEffort(level string) tea.Cmd {
 func (m *model) switchTo(providerID, modelID string) tea.Cmd {
 	m.busy = "switching"
 	a, ctx := m.app, m.ctx
-	return tea.Batch(m.spin.Tick, func() tea.Msg {
+	return tea.Batch(m.spin.Tick, m.background(func() tea.Msg {
 		return switchedMsg{err: a.Switch(ctx, providerID, modelID)}
-	})
+	}))
 }
 
 func (m *model) fetchModels(pick bool, filter string) tea.Cmd {
 	m.busy = "listing models"
 	a, ctx := m.app, m.ctx
-	return tea.Batch(m.spin.Tick, func() tea.Msg {
+	return tea.Batch(m.spin.Tick, m.background(func() tea.Msg {
 		models, err := a.Models(ctx)
 		return modelsMsg{models: models, err: err, pick: pick, filter: filter}
-	})
+	}))
 }
 
 func (m *model) showModels(msg modelsMsg) tea.Cmd {
@@ -195,7 +210,8 @@ func (m *model) complete() tea.Cmd {
 	if !strings.HasPrefix(v, "/") || strings.Contains(v, " ") {
 		return nil
 	}
-	if m.tabSeed == "" {
+	// A paste changes the input without a key press, so the input is checked too.
+	if m.tabSeed == "" || v != m.tabLast {
 		m.tabSeed, m.tabIdx = v, 0
 	}
 	var matches []string
@@ -207,9 +223,31 @@ func (m *model) complete() tea.Cmd {
 	if len(matches) == 0 {
 		return nil
 	}
-	m.input.SetValue(matches[m.tabIdx%len(matches)])
+	m.tabLast = matches[m.tabIdx%len(matches)]
+	m.input.SetValue(m.tabLast)
 	m.tabIdx++
 	return nil
+}
+
+// searchHistory opens a picker over earlier prompts, newest first. The choice goes into the
+// input, not straight to the model.
+func (m *model) searchHistory() {
+	seen := map[string]bool{}
+	var items []string
+	for i := len(m.hist.Entries) - 1; i >= 0; i-- {
+		if e := m.hist.Entries[i]; !seen[e] {
+			seen[e] = true
+			items = append(items, e)
+		}
+	}
+	if len(items) == 0 {
+		return
+	}
+	m.picker = newPicker("history", items, "", func(s string) tea.Cmd {
+		m.input.SetValue(s)
+		m.histPos, m.draft = len(m.hist.Entries), ""
+		return nil
+	})
 }
 
 // picker chooses one item from a list, filtered as the user types.
@@ -256,19 +294,31 @@ func (m *model) pickerKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "esc", "ctrl+c":
 		m.picker = nil
 	case "enter":
-		m.picker = nil
+		// With no matches the picker stays open, so the filter can be fixed.
 		if len(matches) > 0 {
+			m.picker = nil
 			return tea.Sequence(p.choose(matches[min(p.cursor, len(matches)-1)]), m.flush())
 		}
 	case "up", "ctrl+p":
 		p.cursor = max(p.cursor-1, 0)
 	case "down", "ctrl+n", "tab":
 		p.cursor = min(p.cursor+1, max(len(matches)-1, 0))
+	case "pgup":
+		p.cursor = max(p.cursor-pickerRows, 0)
+	case "pgdown":
+		p.cursor = min(p.cursor+pickerRows, max(len(matches)-1, 0))
+	case "home":
+		p.cursor = 0
+	case "end":
+		p.cursor = max(len(matches)-1, 0)
 	case "backspace":
 		if p.filter != "" {
-			p.filter = p.filter[:len(p.filter)-1]
+			_, n := utf8.DecodeLastRuneInString(p.filter)
+			p.filter = p.filter[:len(p.filter)-n]
 			p.cursor = 0
 		}
+	case "ctrl+u":
+		p.filter, p.cursor = "", 0
 	default:
 		if msg.Text != "" {
 			p.filter += msg.Text
@@ -293,7 +343,7 @@ func (p *picker) view(st Styles, width int) string {
 		if it == p.current {
 			mark = "* "
 		}
-		line := ansi.Truncate(mark+it, width-1, "...")
+		line := ansi.Truncate(mark+oneLine(it), width-1, "...")
 		if i == p.cursor {
 			line = st.Selected.Render(line)
 		} else {

@@ -26,6 +26,10 @@ func TestMarkdownLines(t *testing.T) {
 		{"a * b * c", "a * b * c"},
 		{"snake_case_name", "snake_case_name"},
 		{"`**not bold**`", "**not bold**"},
+		{"``a`b`` and `c`", "a`b and c"},
+		{"- [ ] todo", "- [ ] todo"},
+		{"- [x] done `x`", "- [x] done x"},
+		{"| a | b |", "| a | b |"},
 	}
 	for _, c := range cases {
 		if got := ansi.Strip(md.line(c.in)); got != c.want {
@@ -129,5 +133,20 @@ func TestApprovalColoursTheDiff(t *testing.T) {
 	}
 	if strings.Contains(plain, `\x0d`) || strings.HasSuffix(plain, "\n") {
 		t.Errorf("CR or trailing blank line shown:\n%q", plain)
+	}
+}
+
+func TestWideTableRowsLosePadding(t *testing.T) {
+	md := markdown{st: NewStyles(), width: 30}
+	cases := []struct{ in, want string }{
+		{"| name      | value        | note |", "| name | value | note |"},
+		{"|:----------|-------------:|------|", "| :--- | ---: | --- |"},
+		{"| a \\| b     | c            | d    |", "| a \\| b | c | d |"},
+		{"| fits | row |", "| fits | row |"},
+	}
+	for _, c := range cases {
+		if got := ansi.Strip(md.line(c.in)); got != c.want {
+			t.Errorf("line(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

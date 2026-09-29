@@ -439,6 +439,9 @@ func (a *App) HasKey(id string) bool {
 // ConfigDir is where the user's AGENTS.md and skills are read from.
 func (a *App) ConfigDir() string { return a.opts.ConfigDir }
 
+// Root is the working directory the tools and the permission checks use.
+func (a *App) Root() string { return a.opts.Root }
+
 // usesVendorURL reports whether the provider talks to its vendor, whose rates the price list
 // quotes, rather than a --base-url gateway.
 func (a *App) usesVendorURL(id string) bool {
