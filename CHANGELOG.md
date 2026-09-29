@@ -6,6 +6,8 @@
 
 - REPL: Ctrl-R searches earlier prompts in a picker and puts the choice in the input, unsent. `/copy` sends the last answer to the clipboard through the terminal (OSC 52), which also works over SSH; a terminal without OSC 52 support ignores it.
 
+- The REPL aligns markdown tables and honours `:-:` and `--:` column alignment. A table is held until its last row, since column widths depend on every row; the live view shows it aligned so far. Lines starting with `|` and no separator row print as before.
+
 - A trust question per checkout. When the mode is `auto` by default or from `settings.toml`, and the checkout has an `AGENTS.md`, gilda asks once whether to trust it and saves the answer in `state.json`. Declining uses `ask` mode there. A cloned repository could otherwise instruct an agent that runs `bash` unasked. An explicit `--permissions` skips the question, so scripts that set a mode keep working. A run with no one to answer uses `ask` and saves nothing. Embedding apps opt in through `App.Trust` and `App.SetTrust`.
 
 - `bash_env` under `[tools]` names provider key variables that `bash` still receives; see Fixed.
@@ -57,7 +59,7 @@
 
 - Tab after a paste kept cycling through the commands matching the text before it, since only a key press reset the cycle. It now restarts whenever the input differs from its last completion.
 
-- A markdown table row wider than the terminal wrapped mid-cell. It now drops its cell padding first; nothing is cut. Task-list boxes (`- [ ]`, `- [x]`) are styled, and a double-backtick code span such as ``` ``a`b`` ``` is parsed.
+- A markdown table wider than the terminal wrapped mid-cell. It now drops its column padding instead; nothing is cut. `|` lines without a separator row get the same treatment when too wide. Task-list boxes (`- [ ]`, `- [x]`) are styled, and a double-backtick code span such as ``` ``a`b`` ``` is parsed.
 
 - The REPL banner and status bar showed the process's working directory, not `app.Options.Root`, so an embedding app with another root showed the wrong one. `App.Root` exposes it.
 
@@ -74,6 +76,8 @@
 - Leaving the REPL mid-turn could leave the agent goroutine blocked forever on a full event channel. Its sends now also stop when `tui.Run` returns, and `Run` waits for it. The per-prompt context was not enough: Esc cancels it, and the final result must still arrive.
 
 - The REPL input showed its key-binding hint on every empty prompt. It now shows only before the first entry.
+
+- The REPL showed the line still streaming as raw markdown, then restyled it when its newline arrived. It is now styled as it streams.
 
 - `a` at an approval prompt approved every later call of that tool, secrets and protected paths included, for the rest of the session. It now covers one tool and one kind of reason, such as `edit` outside the working directory, and ends at `/clear` or `/permissions`. It is not offered for a secret or protected path. An edit to `.env` outside the working directory is now reported as a secret, not as outside, so an earlier `a` for outside paths does not cover it.
 

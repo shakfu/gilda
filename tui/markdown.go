@@ -8,14 +8,15 @@ import (
 )
 
 // markdown styles assistant text one complete line at a time, so it can render a stream as it
-// arrives. Only fences carry state between lines. Tables pass through unchanged: they are
-// already aligned in a monospace terminal. A row wider than width loses its cell padding
-// instead, since a wrapped aligned row is harder to read than an unaligned one.
+// arrives. Fences and tables carry state between lines. A table is held until it ends, since
+// its column widths depend on every row. A table wider than width loses its column padding,
+// since an aligned row that wraps is harder to read than an unaligned one.
 type markdown struct {
 	st      Styles
 	width   int
 	inFence bool
 	fence   string
+	table   []string
 }
 
 var (
@@ -30,9 +31,146 @@ var (
 	boldRe     = regexp.MustCompile(`\*\*([^*]+)\*\*|__([^_]+)__`)
 	italicRe   = regexp.MustCompile(`(^|[^*\w])\*([^*\s][^*]*)\*|(^|[^_\w])_([^_\s][^_]*)_`)
 	linkRe     = regexp.MustCompile(`\[([^\]]+)\]\(([^)\s]+)\)`)
+
+	tableRow = regexp.MustCompile(`^\s*\|`)
+	tableSep = regexp.MustCompile(`^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$`)
 )
 
-func (m *markdown) reset() { m.inFence, m.fence = false, "" }
+func (m *markdown) reset() { m.inFence, m.fence, m.table = false, "", nil }
+
+// add renders one complete line. It returns nothing while a table is open, then the table
+// with the line that ended it.
+func (m *markdown) add(s string) []string {
+	if !m.inFence && tableRow.MatchString(s) {
+		m.table = append(m.table, s)
+		return nil
+	}
+	return append(m.flush(), m.line(s))
+}
+
+// flush renders a held table: aligned if its second row is a separator, else line by line,
+// with the padding dropped from a line wider than width.
+func (m *markdown) flush() []string {
+	rows := m.table
+	m.table = nil
+	if len(rows) >= 2 && tableSep.MatchString(rows[1]) {
+		return m.align(rows)
+	}
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		if m.width > 0 && ansi.StringWidth(r) > m.width {
+			end := ""
+			if t := strings.TrimSpace(r); strings.HasSuffix(t, "|") && !strings.HasSuffix(t, `\|`) {
+				end = " |"
+			}
+			r = "| " + strings.Join(cells(r), " | ") + end
+		}
+		out[i] = m.line(r)
+	}
+	return out
+}
+
+func (m *markdown) align(rows []string) []string {
+	var grid [][]string
+	var widths []int
+	for i, r := range rows {
+		cs := cells(r)
+		for j, c := range cs {
+			switch i {
+			case 0:
+				cs[j] = m.st.Bold.Render(stripInline(c))
+			case 1:
+				continue
+			default:
+				cs[j] = m.inline(c)
+			}
+			if j == len(widths) {
+				widths = append(widths, 0)
+			}
+			widths[j] = max(widths[j], ansi.StringWidth(cs[j]))
+		}
+		grid = append(grid, cs)
+	}
+	total := 1
+	for _, w := range widths {
+		total += w + 3
+	}
+	compact := m.width > 0 && total > m.width
+	bar := m.st.Dim.Render("|")
+	out := make([]string, len(grid))
+	for i, cs := range grid {
+		var b strings.Builder
+		b.WriteString(bar)
+		for j, w := range widths {
+			if i == 1 {
+				if compact {
+					w = 1
+				}
+				b.WriteString(m.st.Dim.Render(strings.Repeat("-", w+2) + "|"))
+				continue
+			}
+			c := ""
+			if j < len(cs) {
+				c = cs[j]
+			}
+			if compact {
+				w = ansi.StringWidth(c)
+			}
+			b.WriteString(" " + pad(c, w, colAlign(grid[1], j)) + " " + bar)
+		}
+		out[i] = b.String()
+	}
+	return out
+}
+
+// colAlign reads column j's alignment from the separator row: 'l', 'c' or 'r'.
+func colAlign(sep []string, j int) byte {
+	if j >= len(sep) {
+		return 'l'
+	}
+	l, r := strings.HasPrefix(sep[j], ":"), strings.HasSuffix(sep[j], ":")
+	switch {
+	case l && r:
+		return 'c'
+	case r:
+		return 'r'
+	}
+	return 'l'
+}
+
+func pad(s string, w int, align byte) string {
+	n := w - ansi.StringWidth(s)
+	switch align {
+	case 'r':
+		return strings.Repeat(" ", n) + s
+	case 'c':
+		return strings.Repeat(" ", n/2) + s + strings.Repeat(" ", n-n/2)
+	}
+	return s + strings.Repeat(" ", n)
+}
+
+// cells splits a table row on unescaped pipes, dropping the outer ones.
+func cells(row string) []string {
+	row = strings.TrimPrefix(strings.TrimSpace(row), "|")
+	if strings.HasSuffix(row, "|") && !strings.HasSuffix(row, `\|`) {
+		row = row[:len(row)-1]
+	}
+	var out []string
+	var b strings.Builder
+	for i := 0; i < len(row); i++ {
+		switch {
+		case row[i] == '\\' && i+1 < len(row) && row[i+1] == '|':
+			b.WriteByte('|')
+			i++
+		case row[i] == '|':
+			out = append(out, strings.TrimSpace(b.String()))
+			b.Reset()
+		default:
+			b.WriteByte(row[i])
+		}
+	}
+	return append(out, strings.TrimSpace(b.String()))
+}
 
 func (m *markdown) line(s string) string {
 	if f := fenceRe.FindStringSubmatch(s); f != nil {
@@ -56,9 +194,6 @@ func (m *markdown) line(s string) string {
 		return m.st.Dim.Render(strings.Repeat("-", 40))
 	case strings.HasPrefix(s, ">"):
 		return m.st.Dim.Render("| ") + m.st.Quote.Render(strings.TrimSpace(strings.TrimPrefix(s, ">")))
-	}
-	if strings.HasPrefix(strings.TrimSpace(s), "|") && m.width > 0 && ansi.StringWidth(s) > m.width {
-		return compactRow(s)
 	}
 	if b := bullet.FindStringSubmatch(s); b != nil {
 		if t := task.FindStringSubmatch(b[2]); t != nil {
@@ -118,17 +253,4 @@ func (m *markdown) emphasis(s string) string {
 func stripInline(s string) string {
 	s = boldRe.ReplaceAllString(s, "$1$2")
 	return inlineCode.ReplaceAllString(s, "$1$2")
-}
-
-// compactRow trims the padding around each cell of a table row. An escaped pipe stays in its
-// cell.
-func compactRow(s string) string {
-	cells := strings.Split(strings.ReplaceAll(strings.TrimSpace(s), `\|`, "\x00"), "|")
-	for i, c := range cells {
-		cells[i] = strings.TrimSpace(c)
-		if strings.Trim(cells[i], ":-") == "" && strings.Contains(cells[i], "---") {
-			cells[i] = strings.Replace(cells[i], strings.Trim(cells[i], ":"), "---", 1)
-		}
-	}
-	return strings.ReplaceAll(strings.TrimSpace(strings.Join(cells, " | ")), "\x00", `\|`)
 }

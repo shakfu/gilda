@@ -136,17 +136,82 @@ func TestApprovalColoursTheDiff(t *testing.T) {
 	}
 }
 
-func TestWideTableRowsLosePadding(t *testing.T) {
+func TestWideTablesLosePadding(t *testing.T) {
 	md := markdown{st: NewStyles(), width: 30}
-	cases := []struct{ in, want string }{
-		{"| name      | value        | note |", "| name | value | note |"},
-		{"|:----------|-------------:|------|", "| :--- | ---: | --- |"},
-		{"| a \\| b     | c            | d    |", "| a \\| b | c | d |"},
-		{"| fits | row |", "| fits | row |"},
-	}
-	for _, c := range cases {
-		if got := ansi.Strip(md.line(c.in)); got != c.want {
-			t.Errorf("line(%q) = %q, want %q", c.in, got, c.want)
+	var got []string
+	for _, l := range []string{"| name | a long value here |", "|:-:|--:|", "| x | 1 |", "| wider name | a \\| b |", ""} {
+		for _, r := range md.add(l) {
+			got = append(got, ansi.Strip(r))
 		}
+	}
+	want := []string{
+		"| name | a long value here |",
+		"|---|---|",
+		"| x | 1 |",
+		"| wider name | a | b |",
+		"",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	md.width = 80
+	got = nil
+	for _, l := range []string{"| a | b |", "|---|---|", "| xx | y |", ""} {
+		for _, r := range md.add(l) {
+			got = append(got, ansi.Strip(r))
+		}
+	}
+	if got[0] != "| a  | b |" {
+		t.Errorf("a table that fits lost its padding: %q", got)
+	}
+}
+
+func TestTablesAreAligned(t *testing.T) {
+	md := markdown{st: NewStyles()}
+	var got []string
+	for _, l := range []string{"| a | long header |", "|:-:|--:|", "| `x` | 1 |", "| wide cell | a \\| b |", "after"} {
+		for _, r := range md.add(l) {
+			got = append(got, ansi.Strip(r))
+		}
+	}
+	want := []string{
+		"|     a     | long header |",
+		"|-----------|-------------|",
+		"|     x     |           1 |",
+		"| wide cell |       a | b |",
+		"after",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestPipeLinesWithoutSeparatorPassThrough(t *testing.T) {
+	md := markdown{st: NewStyles()}
+	if out := md.add("| not a table"); out != nil {
+		t.Fatalf("row not held: %q", out)
+	}
+	got := md.flush()
+	if len(got) != 1 || ansi.Strip(got[0]) != "| not a table" {
+		t.Errorf("got %q", got)
+	}
+	md.add("```")
+	if out := md.add("| code |"); len(out) != 1 {
+		t.Errorf("a pipe line inside a fence was held: %q", out)
+	}
+}
+
+func TestWideRowsWithoutSeparatorLosePadding(t *testing.T) {
+	md := markdown{st: NewStyles(), width: 20}
+	md.add("| name       | value      |")
+	md.add("| short |")
+	md.add("| no closing pipe            ")
+	got := md.flush()
+	for i := range got {
+		got[i] = ansi.Strip(got[i])
+	}
+	want := []string{"| name | value |", "| short |", "| no closing pipe"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
