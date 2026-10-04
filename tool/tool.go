@@ -24,6 +24,8 @@ type Result struct {
 	// Failed marks work that ran but reported a problem, such as a non-zero exit. The model
 	// gets the output either way; the user sees the call in a warning colour.
 	Failed bool
+	// Images go to the model after Output, when it accepts images.
+	Images []llm.Image
 }
 
 type Tool interface {
@@ -100,6 +102,9 @@ type Env struct {
 	Limits Limits
 	// Hide names environment variables bash does not pass on, such as provider keys.
 	Hide []string
+	// Seen, when set, makes edit and write refuse a file read has not returned, or one that
+	// changed since; see Seen.
+	Seen *Seen
 }
 
 // Limits bound what the built-in tools return, read and run. OutputCap, ReadLines and
@@ -136,8 +141,13 @@ func (e Env) limits() Limits {
 			*f.v = f.d
 		}
 	}
+	// bash keeps 1 KiB of the cap for its notes; under that its capture panics.
+	l.OutputCap = max(l.OutputCap, MinOutputCap)
 	return l
 }
+
+// MinOutputCap is the smallest OutputCap the tools use; a smaller one is raised to it.
+const MinOutputCap = 4096
 
 // Default returns read, write, edit and bash.
 func Default(env Env) []Tool {

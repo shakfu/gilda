@@ -2,6 +2,8 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -184,5 +186,62 @@ func TestRefusalsAndFilteredResponsesStopAsRefusals(t *testing.T) {
 		if err != nil || resp.Stop != c.want || resp.Message.Text != c.text || streamed.String() != c.text {
 			t.Errorf("%s: stop %q text %q streamed %q err %v", name, resp.Stop, resp.Message.Text, streamed.String(), err)
 		}
+	}
+}
+
+// A saved and restored payload replays the same request as the one kept in memory.
+func TestNativePayloadSurvivesSaving(t *testing.T) {
+	srv := llmtest.New(t, turn, answer, answer)
+	p := New("openai", "k", srv.URL)
+	user := llm.Message{Role: llm.User, Text: "hi"}
+	resp, err := p.Stream(context.Background(), request("gpt-x", user), func(llm.Event) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := llm.Message{Role: llm.Tool, Results: []llm.ToolResult{{CallID: "call_1", Content: "x"}}}
+	for _, m := range []llm.Message{resp.Message, llmtest.Restore(t, Codec, resp.Message)} {
+		h := []llm.Message{user, m, results}
+		if _, err := p.Stream(context.Background(), request("gpt-x", h...), func(llm.Event) {}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(srv.Bodies[1], srv.Bodies[2]) {
+		t.Fatalf("in memory:\n%v\nrestored:\n%v", srv.Bodies[1], srv.Bodies[2])
+	}
+	if _, err := Codec.Encode("not a payload"); err == nil {
+		t.Fatal("a foreign payload was encoded")
+	}
+	for _, bad := range []string{`"x"`, `{}`, `[{}]`} {
+		if _, err := Codec.Decode(json.RawMessage(bad)); err == nil {
+			t.Errorf("decoded %s", bad)
+		}
+	}
+}
+
+// An image goes inside the function_call_output, after its text.
+func TestToolResultImagesAreSent(t *testing.T) {
+	srv := llmtest.New(t, answer)
+	if _, err := New("openai", "k", srv.URL).Stream(context.Background(), request("gpt-x", llmtest.ImageHistory("call_1")...), func(llm.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	item := llmtest.Get(srv.Bodies[0], "input", 2)
+	if llmtest.Get(item, "type") != "function_call_output" || llmtest.Get(item, "output", 0, "text") != "a.png is a PNG image" ||
+		llmtest.Get(item, "output", 1, "type") != "input_image" || llmtest.Get(item, "output", 1, "image_url") != llmtest.PNGDataURL {
+		t.Fatalf("item %v", item)
+	}
+}
+
+// A payload this adapter did not make, under its name and model, is rebuilt from text and
+// calls rather than asserted.
+func TestAForeignPayloadIsRebuilt(t *testing.T) {
+	srv := llmtest.New(t, answer)
+	h := llmtest.ImageHistory("call_1")
+	h[1].Text = "looking"
+	h[1].Native = &llm.Native{Provider: "openai", Model: "gpt-x", Data: "not a payload"}
+	if _, err := New("openai", "k", srv.URL).Stream(context.Background(), request("gpt-x", h...), func(llm.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if body, _ := json.Marshal(srv.Bodies[0]); !strings.Contains(string(body), `"looking"`) {
+		t.Fatalf("the message was not rebuilt: %s", body)
 	}
 }

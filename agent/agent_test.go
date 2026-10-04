@@ -298,6 +298,7 @@ func TestRecordsAreJSONReady(t *testing.T) {
 	}{
 		{Text{"hi"}, `{"text":"hi","type":"text"}`},
 		{Retry{Attempt: 2, Reason: "529 status code 529"}, `{"attempt":2,"reason":"529 status code 529","type":"retry"}`},
+		{Elided{Results: 3, Bytes: 9000}, `{"bytes":9000,"results":3,"type":"elided"}`},
 		{ToolCall{Call: llm.ToolCall{ID: "1", Name: "read", Arguments: `{"path":"a"}`}, Label: "read a"},
 			`{"arguments":{"path":"a"},"id":"1","label":"read a","name":"read","type":"tool_call"}`},
 		{ToolCall{Call: llm.ToolCall{ID: "2", Name: "read", Arguments: `{"pa`}},
@@ -401,5 +402,219 @@ func TestApprovalBindsTheTarget(t *testing.T) {
 		if data, _ := os.ReadFile(path); string(data) != want {
 			t.Errorf("%s is %q", path, data)
 		}
+	}
+}
+
+// readStep is a mock step that reads path and reports in input tokens.
+func readStep(path string, in int64) mock.Step {
+	return mock.Step{Calls: []mock.Call{call("read", map[string]string{"path": path})}, Usage: usage(in, 0, 0)}
+}
+
+func TestOldToolResultsAreElidedPastSeventyPercent(t *testing.T) {
+	steps := []mock.Step{}
+	for i := 0; i < 6; i++ {
+		steps = append(steps, readStep("big.txt", 100))
+	}
+	// The window is 10k tokens; usage passes 70% on the last round-trip before the answer.
+	steps[5].Usage = usage(7500, 0, 0)
+	steps = append(steps, mock.Step{Text: "done", Usage: usage(3000, 0, 0)})
+	a, p, root := newAgent(t, steps...)
+	a.Context = 10_000
+	if err := os.WriteFile(filepath.Join(root, "big.txt"), []byte(strings.Repeat("x\n", 3000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var elided []Elided
+	if _, err := a.Run(context.Background(), "go", func(e Event) {
+		if e, ok := e.(Elided); ok {
+			elided = append(elided, e)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(elided) != 1 || elided[0].Results != 2 {
+		t.Fatalf("elided %+v", elided)
+	}
+	// The last request saw the two oldest results as stubs and the newest four whole.
+	last := p.Requests[len(p.Requests)-1].Messages
+	var stubs, whole int
+	for _, m := range last {
+		for _, r := range m.Results {
+			switch {
+			case strings.HasPrefix(r.Content, "[gilda: elided ") && strings.Contains(r.Content, "of read output"):
+				stubs++
+			case len(r.Content) > elideMin:
+				whole++
+			}
+		}
+	}
+	if stubs != 2 || whole != 4 {
+		t.Fatalf("stubs %d whole %d", stubs, whole)
+	}
+	if a.Used != 3000 {
+		t.Fatalf("used %d: the next response's usage replaces the estimate", a.Used)
+	}
+}
+
+// Eliding a little at a time would break the prompt cache on every turn, so an elision that
+// frees under a tenth of the window is not done.
+func TestASmallElisionIsSkipped(t *testing.T) {
+	steps := []mock.Step{}
+	for i := 0; i < 5; i++ {
+		steps = append(steps, readStep("small.txt", 8000))
+	}
+	steps = append(steps, mock.Step{Text: "done"})
+	a, p, root := newAgent(t, steps...)
+	a.Context = 10_000
+	if err := os.WriteFile(filepath.Join(root, "small.txt"), []byte(strings.Repeat("y\n", 200)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Run(context.Background(), "go", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range p.Requests[len(p.Requests)-1].Messages {
+		for _, r := range m.Results {
+			if isStub(r.Content) {
+				t.Fatal("a result was elided for a small gain")
+			}
+		}
+	}
+}
+
+func TestElisionCanBeTurnedOff(t *testing.T) {
+	a, _, _ := newAgent(t)
+	a.KeepResults = -1
+	a.Context = 100
+	a.History = []llm.Message{{Role: llm.Tool, Results: []llm.ToolResult{{Content: strings.Repeat("z", 5000)}}}}
+	if n, _, _ := a.elide(); n != 0 {
+		t.Fatalf("elided %d", n)
+	}
+}
+
+// Past 85% the model is told once, in the message about to be sent, so the cached prefix holds.
+func TestTheModelIsWarnedOnceNearAFullWindow(t *testing.T) {
+	a, p, _ := newAgent(t,
+		mock.Step{Calls: []mock.Call{call("read", map[string]string{"path": "."})}, Usage: usage(90, 0, 0)},
+		mock.Step{Calls: []mock.Call{call("read", map[string]string{"path": "."})}, Usage: usage(91, 0, 0)},
+		mock.Step{Text: "done", Usage: usage(92, 0, 0)},
+	)
+	a.Context = 100
+	if _, err := a.Run(context.Background(), "go", nil); err != nil {
+		t.Fatal(err)
+	}
+	notes := 0
+	for _, m := range p.Requests[2].Messages {
+		for _, r := range m.Results {
+			notes += strings.Count(r.Content, "of the context window")
+		}
+	}
+	if notes != 1 || !strings.Contains(p.Requests[1].Messages[2].Results[0].Content, "90% of the context window") {
+		t.Fatalf("notes %d, history %+v", notes, p.Requests[1].Messages)
+	}
+}
+
+// Images stay in the history but reach only a model that accepts them.
+func TestImagesReachOnlyAModelThatAcceptsThem(t *testing.T) {
+	img := llm.Image{MediaType: "image/png", Data: []byte("PNG")}
+	pic, err := tool.New(tool.Def{Name: "pic", ReadOnly: true, Run: func(context.Context, json.RawMessage) (tool.Result, error) {
+		return tool.Result{Output: "a picture", Images: []llm.Image{img}}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, accepts := range []bool{false, true} {
+		p := mock.New(mock.Step{Calls: []mock.Call{{Name: "pic"}}}, mock.Step{Text: "seen"})
+		a := New(Config{Provider: p, Model: "m", Tools: []tool.Tool{pic}, Images: accepts})
+		if _, err := a.Run(context.Background(), "look", nil); err != nil {
+			t.Fatal(err)
+		}
+		sent := p.Requests[1].Messages[2].Results[0]
+		kept := a.History[2].Results[0]
+		if len(kept.Images) != 1 || kept.Content != "a picture" {
+			t.Fatalf("accepts %v: history %+v", accepts, kept)
+		}
+		if accepts != (len(sent.Images) == 1) || accepts == strings.Contains(sent.Content, "not sent") {
+			t.Fatalf("accepts %v: sent %+v", accepts, sent)
+		}
+	}
+}
+
+func TestOldImagesAreElided(t *testing.T) {
+	a, _, _ := newAgent(t)
+	a.Context = 10_000
+	img := llm.ToolResult{CallID: "c", Content: "a picture", Images: []llm.Image{{MediaType: "image/png", Data: []byte("PNG")}}}
+	for range keepResults + 1 {
+		a.History = append(a.History, llm.Message{Role: llm.Tool, Results: []llm.ToolResult{img}})
+	}
+	n, _, tokens := a.elide()
+	if n != 1 || tokens != imageTokens+int64(len("a picture")/bytesPerToken) || a.History[0].Results[0].Images != nil || !isStub(a.History[0].Results[0].Content) {
+		t.Fatalf("elided %d (%d tokens): %+v", n, tokens, a.History[0])
+	}
+	if len(a.History[keepResults].Results[0].Images) != 1 {
+		t.Fatal("a recent image was elided")
+	}
+}
+
+// A subagent's work stays out of the caller's history; its answer, its calls and its usage
+// reach the caller.
+func TestTaskRunsASubagent(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "a.go"), []byte(strings.Repeat("filler\n", 50)+"func Needle() {}\n"), 0o644)
+	child := mock.New(
+		mock.Step{Calls: []mock.Call{call("read", map[string]string{"path": "a.go"})}, Usage: usage(50, 5, 0.01)},
+		mock.Step{Text: "Needle is defined at a.go:51.", Usage: usage(80, 10, 0.02)},
+	)
+	task := Task{New: func() *Agent {
+		return New(Config{Provider: child, Model: "m", Tools: []tool.Tool{tool.Read{Env: tool.Env{Root: root}}}})
+	}}
+	parent := mock.New(
+		mock.Step{Calls: []mock.Call{call("task", map[string]string{"prompt": "find Needle"})}, Usage: usage(100, 5, 0.1)},
+		mock.Step{Text: "It is in a.go.", Usage: usage(120, 5, 0.1)},
+	)
+	a := New(Config{Provider: parent, Model: "m", Tools: []tool.Tool{task}})
+	var labels []string
+	var done []TaskDone
+	res, err := a.Run(context.Background(), "where is Needle?", func(e Event) {
+		switch e := e.(type) {
+		case ToolResult:
+			labels = append(labels, e.Label)
+		case TaskDone:
+			done = append(done, e)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.History[2].Results[0].Content; got != "Needle is defined at a.go:51." {
+		t.Fatalf("task result %q", got)
+	}
+	for _, m := range parent.Requests[1].Messages {
+		for _, r := range m.Results {
+			if strings.Contains(r.Content, "filler") {
+				t.Fatal("the subagent's read reached the caller")
+			}
+		}
+	}
+	if strings.Join(labels, "|") != "[task] read a.go|task find Needle" {
+		t.Fatalf("labels %v", labels)
+	}
+	if len(done) != 1 || done[0].Turns != 2 || done[0].Usage.Input != 130 {
+		t.Fatalf("done %+v", done)
+	}
+	if res.Usage.Input != 350 || a.Usage.Input != 350 || *res.Usage.Cost < 0.229 {
+		t.Fatalf("run usage %+v session %+v", res.Usage, a.Usage)
+	}
+}
+
+func TestATaskThatStopsEarlyReportsWhatItHas(t *testing.T) {
+	child := mock.New(mock.Step{Text: "partial", Calls: []mock.Call{call("read", map[string]string{"path": "x"})}})
+	task := Task{New: func() *Agent {
+		return New(Config{Provider: child, Model: "m", MaxTurns: 1, Tools: tool.Default(tool.Env{Root: t.TempDir()})})
+	}}
+	out, err := task.Run(context.Background(), json.RawMessage(`{"prompt":"go"}`))
+	if err != nil || !out.Failed || !strings.Contains(out.Output, "partial") || !strings.Contains(out.Output, "stopped early") {
+		t.Fatalf("%+v %v", out, err)
+	}
+	if _, err := task.Run(context.Background(), json.RawMessage(`{"prompt":" "}`)); err == nil {
+		t.Fatal("an empty prompt was accepted")
 	}
 }

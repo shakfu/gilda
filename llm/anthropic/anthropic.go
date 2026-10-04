@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -112,13 +113,16 @@ func (p *Provider) messages(req llm.Request) []sdk.MessageParam {
 		case llm.Tool:
 			blocks := make([]sdk.ContentBlockParamUnion, 0, len(m.Results))
 			for _, r := range m.Results {
-				blocks = append(blocks, sdk.NewToolResultBlock(toolID(r.CallID), r.Content, r.IsError))
+				blocks = append(blocks, toolResult(r))
 			}
 			out = append(out, sdk.NewUserMessage(blocks...))
 		case llm.Assistant:
+			// A payload of another type, from an adapter sharing this name, is rebuilt instead.
 			if native, ok := m.NativeFor(p.name, req.Model); ok {
-				out = append(out, native.(sdk.MessageParam))
-				continue
+				if mp, ok := native.(sdk.MessageParam); ok {
+					out = append(out, mp)
+					continue
+				}
 			}
 			var blocks []sdk.ContentBlockParamUnion
 			if m.Text != "" {
@@ -133,6 +137,19 @@ func (p *Provider) messages(req llm.Request) []sdk.MessageParam {
 		}
 	}
 	return out
+}
+
+// toolResult carries the result's images after its text, inside the tool_result block.
+func toolResult(r llm.ToolResult) sdk.ContentBlockParamUnion {
+	b := sdk.NewToolResultBlock(toolID(r.CallID), r.Content, r.IsError)
+	for _, img := range r.Images {
+		b.OfToolResult.Content = append(b.OfToolResult.Content, sdk.ToolResultBlockParamContentUnion{
+			OfImage: &sdk.ImageBlockParam{Source: sdk.ImageBlockParamSourceUnion{OfBase64: &sdk.Base64ImageSourceParam{
+				Data: img.Base64(), MediaType: sdk.Base64ImageSourceMediaType(img.MediaType),
+			}}},
+		})
+	}
+	return b
 }
 
 func (p *Provider) response(model string, msg sdk.Message) llm.Response {
@@ -209,4 +226,30 @@ func wrap(err error) error {
 		return errors.Join(llm.ErrContext, err)
 	}
 	return err
+}
+
+// Codec saves and restores the MessageParam this adapter keeps in Native.
+var Codec llm.NativeCodec = codec{}
+
+type codec struct{}
+
+func (codec) Encode(data any) (json.RawMessage, error) {
+	v, ok := data.(sdk.MessageParam)
+	if !ok {
+		return nil, fmt.Errorf("anthropic: native payload is %T", data)
+	}
+	return json.Marshal(v)
+}
+
+// Decode refuses anything but an assistant message with content: the SDK's decoder accepts
+// other JSON without error and yields an empty message, which the API would reject.
+func (codec) Decode(raw json.RawMessage) (any, error) {
+	var v sdk.MessageParam
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	if v.Role != sdk.MessageParamRoleAssistant || len(v.Content) == 0 {
+		return nil, errors.New("anthropic: native payload is not an assistant message")
+	}
+	return v, nil
 }

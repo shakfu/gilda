@@ -4,6 +4,32 @@
 
 ### Added
 
+- `/sessions` lists the conversations saved for the working directory, and `/resume [id]` continues one without leaving the REPL, keeping the provider and model. Without an id it opens a picker.
+
+- `task` runs a subagent on a self-contained research question and returns only its final answer. Exploring a codebase filled the context with file contents and search output the conversation never needed again; a subagent keeps them in a history of its own. It uses the caller's provider, model and approvals, with `read` and `bash` only and a read record of its own, so the caller still reads a file before editing it. Its calls show marked `[task]`, `--json` adds a `task` record with its usage, and its cost counts in the session. A subagent cannot start another. On by default; `[tools] task = false` turns it off. `agent.Task` builds one for embedding apps.
+
+- `go run ./scripts/eval -m MODEL -n N evals/*` runs gilda on scripted tasks and reports, per task, how many runs passed, with mean turns, tokens, cost and time. `scripts/tally` counts tool calls but cannot say whether a run solved its task, and tool decisions in `docs/dev/tools.md` wait on that. A task is a starting repository, a prompt and a check command, with hidden files, such as tests, copied in only for the check. `evals/` holds 8 tasks. Each has a reference solution as a mock script, so the harness, the tasks and their checks are tested offline; each check is also tested to fail on its starting repository. `-settings FILE` runs every task with one `settings.toml`, for A/B comparisons such as `apply_patch = false`. Runs use `--permissions all`, so run untrusted tasks in a container.
+
+- `--tools read,bash` offers only the named tools, and `--append-system TEXT` adds instructions to the end of the system prompt, for a CI job or a review run that needs neither a settings file nor an embedding app. `edit` or `apply_patch` without `read` is refused, since they change only files the model has read. For embedding apps: `app.Options.Only` and `AppendSystem`.
+
+- The REPL rings the terminal bell when a turn that has run for 30 seconds ends or waits for an approval. `[repl] notify = "osc9"` sends a desktop notification instead, and `"off"` turns it off. A shorter turn stays quiet, since its user is likely watching.
+
+- Repositories can ship skills in `.agents/skills/<name>/SKILL.md` at their root. They follow the user's skills in the system prompt and count toward the trust question as a repository's `AGENTS.md` does, since a cloned repository's skill instructs an agent that runs `bash` unasked. `skills = false` under `[prompt]` leaves them out too.
+
+- The system prompt states the date and the git branch at session start. Without a date, the model judged "latest" versions and dates by its training data. The branch saves a `git` call, and is read from `.git/HEAD`, worktrees included, so startup runs no process. Both are fixed for the session, so the prompt cache holds. `prompt.Options.Today` sets the date for embedding apps and tests.
+
+- `apply_patch` for OpenAI models: a patch in the Codex format, adding, updating, moving or deleting files. Two GPT self-reviews made 0 `read` calls and edited through `bash` (`docs/dev/tools.md`). In `auto`, those edits ran unchecked by the protected paths and with no diff on approval. The tool declares every path it touches, binds them before approval as `edit` does, and writes nothing unless every hunk applies. A context line that matches only after whitespace is ignored keeps the file's text. It is offered when the provider is `openai`, or `openrouter` with an `openai/` model, and is fixed for the session so the prompt cache holds. `[tools] apply_patch` overrides the choice. Whether GPT models now call it instead of `bash` is unmeasured; `scripts/tally` counts it.
+
+- `read` returns PNG, JPEG, GIF and WebP files up to 3 MiB as images, so the model can look at a screenshot or a rendered chart. Anthropic and OpenAI get the image inside the tool result. OpenRouter and the Chat Completions servers get it in a user message after the results, since Chat Completions takes images only from the user. Images go only to a model that accepts them: one OpenRouter's list marks so, or one of the `anthropic` or `openai` models it does not list. Other models, local servers included, get a note in its place, since one rejected image would fail every later request. Old images are elided with old tool results. `llm.ToolResult.Images`, `tool.Result.Images` and `agent.Config.Images` carry them for embedding apps.
+
+- `edit`, and `write` over an existing file, refuse a file the model has not read in this conversation, or one changed since its last read. Before, an edit made from an old read applied wherever `old_string` still matched, though the text around it could have changed. A `write` could replace a file the model had never seen. A new file needs no read, and each edit or write records the file it leaves. The check compares size and modification time, so a change that keeps both is not caught. For embedding apps, `tool.Env.Seen` turns it on; `app.New` sets it, and `App.Reset` clears it.
+
+- `read` on a directory lists its entries, sorted and numbered, with `offset` and `limit` as for lines. It used to fail. In `read-only` mode, where `bash` is refused, the model could not find a file it did not already know the path of. A listing in `read` was chosen over a separate `list` or `glob` tool because it adds no tool definition to every request.
+
+- Sessions are saved and resumed. Each conversation is written to `$XDG_STATE_HOME/gilda/sessions/` after every prompt. `-c`/`--continue` resumes the newest one for the working directory, `--resume ID` a given one, and `--sessions` lists them. Reasoning payloads are saved through a codec per adapter (`llm.NativeCodec`, `provider.Entry.Codec`), so a resumed turn replays Anthropic thinking signatures, OpenAI encrypted reasoning and OpenRouter `reasoning_details` to the same model. A payload that fails to decode is dropped with a warning, and that message resumes as text. The SDK decoders accept malformed JSON without error and return empty messages, so each codec checks the payload's shape first. A session from another directory is refused. `[session] save = false` turns saving off. For embedding apps: `app.Options.Continue` and `Resume`, `App.Save`, `App.Reset` and `app.Sessions`.
+
+- Old tool results are elided when the context window passes 70%: each result older than the last 4 tool messages, and over 1 KiB, becomes a one-line stub naming the tool, so the model can call it again. The REPL and `-p` print a `[context]` line and `--json` an `elided` record. Past 85% the model is told once to finish soon. Before, a long session ran into the 95% refusal with no warning, and only `/clear` continued. Elision was chosen over a summarising `/compact` because it needs no extra model call and drops the part the model can recover. It is skipped when it would free under a tenth of the window, since each elision breaks the prompt cache once. `agent.Config.KeepResults` sets the number kept, and a negative value turns elision off.
+
 - REPL: Ctrl-R searches earlier prompts in a picker and puts the choice in the input, unsent. `/copy` sends the last answer to the clipboard through the terminal (OSC 52), which also works over SSH; a terminal without OSC 52 support ignores it.
 
 - The REPL aligns markdown tables and honours `:-:` and `--:` column alignment. A table is held until its last row, since column widths depend on every row; the live view shows it aligned so far. Lines starting with `|` and no separator row print as before.
@@ -56,6 +82,20 @@
 - `go run ./scripts/tally run.jsonl ...` counts tool use in `--json` output per model: calls, failures and output bytes for each tool, with `bash` split by the programs a command runs. See `docs/dev/tools.md`.
 
 ### Fixed
+
+- Two instances that resumed one session overwrote each other's saves, so the conversation saved first was lost. The second to save now continues under a new id and says so.
+
+- `tool.Bash` panicked, in a goroutine no caller could recover, when an embedding app set `Limits.OutputCap` under 1 KiB. A cap under 4 KiB is now raised to 4 KiB, the minimum `settings.toml` already enforced.
+
+- Process groups left running by `bash` were recorded until exit, and `Kill` signalled every recorded id, including ones the system had since reused for unrelated processes. Exited groups are now dropped at each `bash` call; a group that exits after the last call can still be reused.
+
+- `-p` could hang forever on a server that accepted a request and never answered: the client for `anthropic`, `openai` and the local providers set no deadline. It now waits up to 10 minutes for a response to start; a stream's length stays unbounded. The bound is long because a local server may process a long prompt before it answers.
+
+- A reasoning payload of the wrong type under an adapter's name and model, as from a session saved by another adapter, panicked on replay. The message is now rebuilt from its text and tool calls.
+
+- `edit` and `apply_patch` read the whole file into memory, twice over, with no bound. They now refuse a file over 16 MiB.
+
+- `write`, `edit` and `apply_patch` now sync the new file before renaming it into place, and the directory after, so a crash leaves the old file or the new one. They also copy the old file's owner where the user may set it. ACLs, extended attributes and hard links are still not kept.
 
 - Tab after a paste kept cycling through the commands matching the text before it, since only a key press reset the cycle. It now restarts whenever the input differs from its last completion.
 

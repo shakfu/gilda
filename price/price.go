@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,17 @@ type Entry struct {
 	Rates   *Rates `json:"rates,omitempty"`
 	Tiers   []Tier `json:"tiers,omitempty"`
 	Context int64  `json:"context,omitempty"`
+	// Inputs lists the input modalities, such as "text" and "image"; nil when unknown, as in a
+	// list cached before it was recorded.
+	Inputs []string `json:"inputs,omitempty"`
+}
+
+// Images reports whether the model accepts images, and whether the list says.
+func (e Entry) Images() (accepts, known bool) {
+	if e.Inputs == nil {
+		return false, false
+	}
+	return slices.Contains(e.Inputs, "image"), true
 }
 
 // Cost prices u, applying the highest long-prompt tier it reaches.
@@ -93,9 +105,12 @@ func Load(ctx context.Context, cacheDir string, refresh bool) (*Catalog, error) 
 func FromModels(models []components.Model) *Catalog {
 	c := &Catalog{Fetched: time.Now(), Models: make(map[string]Entry, len(models))}
 	for _, m := range models {
-		e := Entry{}
+		e := Entry{Inputs: []string{}}
 		if m.ContextLength != nil {
 			e.Context = *m.ContextLength
+		}
+		for _, in := range m.Architecture.InputModalities {
+			e.Inputs = append(e.Inputs, string(in))
 		}
 		p := m.Pricing
 		base, ok := rates(p.Prompt, p.Completion, p.InputCacheRead, p.InputCacheWrite, nil)

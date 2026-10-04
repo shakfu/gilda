@@ -1,0 +1,2 @@
+prompt = "Each file in handlers/ has a function that returns the HTTP status code its name describes. One of them returns the wrong code. Find it and fix it."
+check = "go test ./..."

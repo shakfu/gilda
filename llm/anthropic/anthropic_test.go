@@ -2,6 +2,8 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -185,5 +187,63 @@ func TestRetriesAreReported(t *testing.T) {
 	}
 	if len(reasons) != 1 || !strings.HasPrefix(reasons[0], "529") {
 		t.Fatalf("reasons %v", reasons)
+	}
+}
+
+// A saved and restored payload replays the same request as the one kept in memory.
+func TestNativePayloadSurvivesSaving(t *testing.T) {
+	srv := llmtest.New(t, turnWithThinkingAndCall, plainAnswer, plainAnswer)
+	p := New("anthropic", "k", srv.URL)
+	user := llm.Message{Role: llm.User, Text: "hi"}
+	resp, err := p.Stream(context.Background(), request("claude-x", user), func(llm.Event) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := llm.Message{Role: llm.Tool, Results: []llm.ToolResult{{CallID: "toolu_1", Content: "x"}}}
+	for _, m := range []llm.Message{resp.Message, llmtest.Restore(t, Codec, resp.Message)} {
+		h := []llm.Message{user, m, results}
+		if _, err := p.Stream(context.Background(), request("claude-x", h...), func(llm.Event) {}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(srv.Bodies[1], srv.Bodies[2]) {
+		t.Fatalf("in memory:\n%v\nrestored:\n%v", srv.Bodies[1], srv.Bodies[2])
+	}
+	if _, err := Codec.Encode("not a payload"); err == nil {
+		t.Fatal("a foreign payload was encoded")
+	}
+	for _, bad := range []string{`"x"`, `{}`, `{"role":"user","content":[{"type":"text","text":"a"}]}`} {
+		if _, err := Codec.Decode(json.RawMessage(bad)); err == nil {
+			t.Errorf("decoded %s", bad)
+		}
+	}
+}
+
+// An image goes inside the tool_result block, after its text.
+func TestToolResultImagesAreSent(t *testing.T) {
+	srv := llmtest.New(t, plainAnswer)
+	if _, err := New("anthropic", "k", srv.URL).Stream(context.Background(), request("claude-x", llmtest.ImageHistory("toolu_1")...), func(llm.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	block := llmtest.Get(srv.Bodies[0], "messages", 2, "content", 0)
+	if llmtest.Get(block, "type") != "tool_result" || llmtest.Get(block, "content", 0, "text") != "a.png is a PNG image" ||
+		llmtest.Get(block, "content", 1, "type") != "image" || llmtest.Get(block, "content", 1, "source", "media_type") != "image/png" ||
+		llmtest.Get(block, "content", 1, "source", "data") != "UE5HREFUQQ==" {
+		t.Fatalf("block %v", block)
+	}
+}
+
+// A payload this adapter did not make, under its name and model, is rebuilt from text and
+// calls rather than asserted.
+func TestAForeignPayloadIsRebuilt(t *testing.T) {
+	srv := llmtest.New(t, plainAnswer)
+	h := llmtest.ImageHistory("toolu_1")
+	h[1].Text = "looking"
+	h[1].Native = &llm.Native{Provider: "anthropic", Model: "claude-x", Data: "not a payload"}
+	if _, err := New("anthropic", "k", srv.URL).Stream(context.Background(), request("claude-x", h...), func(llm.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if body, _ := json.Marshal(srv.Bodies[0]); !strings.Contains(string(body), `"looking"`) {
+		t.Fatalf("the message was not rebuilt: %s", body)
 	}
 }

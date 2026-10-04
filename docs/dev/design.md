@@ -47,7 +47,7 @@ Each update prints through `tea.Sequence(print, listen)`. v2 runs commands in se
 
 - A sandbox. `--permissions` (the `permission` package) catches misdirected writes but does not confine `bash`. `docs/dev/permissions.md` has a design, with links to minima's Linux and macOS implementations.
 
-- Compaction and session resume.
+- Summarising compaction. Old tool results are elided instead (`agent/elide.go`).
 
 - A `thinking` parameter for Anthropic. gilda omits it, so each model runs its default: adaptive on Opus 5, Opus 5.5, Fable and Sonnet 5, none on Opus 4.8 and 4.7.
 

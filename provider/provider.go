@@ -27,6 +27,8 @@ type Entry struct {
 	BaseEnv string
 	// Model is used when none is given or remembered. Empty takes the endpoint's first model.
 	Model string
+	// Codec saves the adapter's Native payloads; nil when it keeps none.
+	Codec llm.NativeCodec
 	open  func(name, key, baseURL string) llm.Provider
 }
 
@@ -60,6 +62,7 @@ var Registry = []Entry{
 		ID:     "anthropic",
 		KeyEnv: []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"},
 		Model:  "claude-opus-5",
+		Codec:  anthropic.Codec,
 		open: func(n, k, u string) llm.Provider {
 			return anthropic.New(n, k, u)
 		},
@@ -68,6 +71,7 @@ var Registry = []Entry{
 		ID:     "openai",
 		KeyEnv: []string{"OPENAI_API_KEY"},
 		Model:  "gpt-5.5",
+		Codec:  openai.Codec,
 		open: func(n, k, u string) llm.Provider {
 			return openai.New(n, k, u)
 		},
@@ -76,6 +80,7 @@ var Registry = []Entry{
 		ID:     "openrouter",
 		KeyEnv: []string{"OPENROUTER_API_KEY"},
 		Model:  "anthropic/claude-opus-5",
+		Codec:  openrouter.Codec,
 		open: func(n, k, u string) llm.Provider {
 			return openrouter.New(n, k, u)
 		},

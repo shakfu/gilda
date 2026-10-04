@@ -106,3 +106,48 @@ func TestAgentsAndSkillsCanBeLeftOut(t *testing.T) {
 		}
 	}
 }
+
+func TestTheEnvironmentStatesTheDateAndBranch(t *testing.T) {
+	repo := t.TempDir()
+	mkfile(t, filepath.Join(repo, ".git", "HEAD"), "ref: refs/heads/feature/x\n")
+	p := Build(repo, "", Options{Today: "2026-10-04"})
+	if !strings.Contains(p, "- Date at session start: 2026-10-04\n") || !strings.Contains(p, "- Git branch at session start: feature/x\n") {
+		t.Fatalf("environment:\n%s", p)
+	}
+	mkfile(t, filepath.Join(repo, ".git", "HEAD"), "0123456789abcdef0123456789abcdef01234567\n")
+	if b := Branch(repo); b != "detached at 0123456" {
+		t.Fatalf("detached: %q", b)
+	}
+	// A worktree's .git is a file naming its git directory.
+	wt, gitDir := t.TempDir(), t.TempDir()
+	mkfile(t, filepath.Join(gitDir, "HEAD"), "ref: refs/heads/wt\n")
+	mkfile(t, filepath.Join(wt, ".git"), "gitdir: "+gitDir+"\n")
+	if b := Branch(filepath.Join(wt)); b != "wt" {
+		t.Fatalf("worktree: %q", b)
+	}
+	if b := Branch(t.TempDir()); b != "" {
+		t.Fatalf("outside a repository: %q", b)
+	}
+	if p := Build(t.TempDir(), "", Options{}); strings.Contains(p, "Git branch") || !strings.Contains(p, "Date at session start: 20") {
+		t.Fatalf("no repository:\n%s", p)
+	}
+}
+
+// A repository's skills, under .agents/skills at its root, follow the user's.
+func TestProjectSkillsFollowTheUsers(t *testing.T) {
+	repo, cfg := t.TempDir(), t.TempDir()
+	mkfile(t, filepath.Join(repo, ".git", "HEAD"), "ref: refs/heads/main")
+	mkfile(t, filepath.Join(repo, ".agents", "skills", "release", "SKILL.md"), "---\ndescription: Cut a release.\n---\n")
+	mkfile(t, filepath.Join(cfg, "skills", "zip", "SKILL.md"), "---\ndescription: Pack files.\n---\n")
+	sub := filepath.Join(repo, "pkg")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := Build(sub, cfg, Options{})
+	if i, j := strings.Index(p, "Pack files."), strings.Index(p, "Cut a release."); i < 0 || j < i {
+		t.Fatalf("skills:\n%s", p)
+	}
+	if strings.Contains(Build(sub, cfg, Options{NoSkills: true}), "Cut a release.") {
+		t.Fatal("NoSkills kept the project's skills")
+	}
+}

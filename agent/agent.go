@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/shakfu/gilda/llm"
 	"github.com/shakfu/gilda/price"
@@ -23,7 +24,8 @@ const Declined = "the user declined this call"
 // stays valid for the next prompt.
 const Cancelled = "cancelled by the user"
 
-// ErrContextFull means the last request came within 5% of the model's window.
+// ErrContextFull means the last request came within 5% of the model's window, after old tool
+// results were elided.
 var ErrContextFull = errors.New("context window is full; start a new conversation")
 
 var errRefused = errors.New("the model refused the request")
@@ -49,8 +51,15 @@ type Config struct {
 	StreamRetries int
 	// OutputCap bounds one tool result in bytes. Default tool.OutputCap.
 	OutputCap int
-	// Context is the model's window in tokens; 0 when unknown.
+	// Context is the model's window in tokens; 0 when unknown, which turns off elision and the
+	// full-window check.
 	Context int64
+	// Images is set when the model accepts images. Otherwise images that tools returned stay in
+	// the history, for a later model that does, but each request carries a note in their place.
+	Images bool
+	// KeepResults is how many recent tool messages keep their results whole when the window
+	// passes 70% and older results are elided. Default 4; negative turns elision off.
+	KeepResults int
 	// Prices estimates cost for providers that report none. May be nil.
 	Prices *price.Catalog
 	// SessionID keys prompt caching.
@@ -66,8 +75,11 @@ type Agent struct {
 	History []llm.Message
 	// Usage totals the session, across /clear.
 	Usage llm.Usage
-	// Used is the context the last request filled: its prompt plus its output.
+	// Used is the context the last request filled: its prompt plus its output. After an
+	// elision it is an estimate until the next response.
 	Used int64
+	// warned is set once the model has been told the window is nearly full.
+	warned bool
 }
 
 func New(cfg Config) *Agent {
@@ -114,6 +126,16 @@ type (
 		Attempt int
 		Reason  string
 	}
+	// Elided reports that Results old tool results, Bytes in all, were replaced by stubs to
+	// free context.
+	Elided struct {
+		Results, Bytes int
+	}
+	// TaskDone reports a subagent's usage, which the run and the session include.
+	TaskDone struct {
+		Usage llm.Usage
+		Turns int
+	}
 	// Response closes one provider round-trip.
 	Response struct {
 		Text  string
@@ -129,6 +151,8 @@ func (ToolCall) event()   {}
 func (ToolResult) event() {}
 func (Response) event()   {}
 func (Retry) event()      {}
+func (Elided) event()     {}
+func (TaskDone) event()   {}
 
 // Result summarises one prompt.
 type Result struct {
@@ -144,6 +168,7 @@ type Result struct {
 func (a *Agent) Reset() {
 	a.History = nil
 	a.Used = 0
+	a.warned = false
 }
 
 // Run sends prompt and loops until the model stops calling tools. On a failure before the model
@@ -157,7 +182,7 @@ func (a *Agent) Run(ctx context.Context, prompt string, emit func(Event)) (Resul
 	var res Result
 	cut := 0 // consecutive round-trips whose stream ended early
 	for res.Turns < a.MaxTurns {
-		if a.Context > 0 && a.Used >= a.Context*95/100 {
+		if a.manageContext(emit) {
 			// Completed turns stay: their tools already changed files the model must remember.
 			if len(a.History) == start+1 {
 				a.History = a.History[:start]
@@ -223,7 +248,8 @@ func (a *Agent) Run(ctx context.Context, prompt string, emit func(Event)) (Resul
 			skip = errRefused
 		}
 		if len(msg.Calls) > 0 {
-			results, err := a.runTools(ctx, msg.Calls, skip, emit)
+			tctx := context.WithValue(ctx, runKey{}, &runState{agent: a, res: &res, emit: emit})
+			results, err := a.runTools(tctx, msg.Calls, skip, emit)
 			a.History = append(a.History, llm.Message{Role: llm.Tool, Results: results})
 			if err != nil {
 				return res, err
@@ -243,12 +269,51 @@ func (a *Agent) request() llm.Request {
 	return llm.Request{
 		Model:     a.Model,
 		System:    a.System,
-		Messages:  a.History,
+		Messages:  a.messages(),
 		Tools:     tool.Specs(a.Tools),
 		MaxTokens: a.MaxTokens,
 		Effort:    a.Effort,
 		SessionID: a.SessionID,
 	}
+}
+
+// imageNote replaces images for a model that does not accept them.
+const imageNote = "\n[gilda: the image was not sent, since this model does not accept images]"
+
+// messages is the history as the model receives it: without images unless it accepts them.
+func (a *Agent) messages() []llm.Message {
+	if a.Images {
+		return a.History
+	}
+	var out []llm.Message
+	for i, m := range a.History {
+		if !hasImages(m) {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(a.History)
+		}
+		rs := slices.Clone(m.Results)
+		for j := range rs {
+			if len(rs[j].Images) > 0 {
+				rs[j].Images, rs[j].Content = nil, rs[j].Content+imageNote
+			}
+		}
+		out[i].Results = rs
+	}
+	if out == nil {
+		return a.History
+	}
+	return out
+}
+
+func hasImages(m llm.Message) bool {
+	for _, r := range m.Results {
+		if len(r.Images) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // runTools runs calls in order. Every call gets a result, even after a cancel, because the next
@@ -287,7 +352,7 @@ func (a *Agent) runTools(ctx context.Context, calls []llm.ToolCall, skip error, 
 		if err != nil {
 			results = append(results, llm.ToolResult{CallID: c.ID, Content: err.Error(), IsError: true})
 		} else {
-			results = append(results, llm.ToolResult{CallID: c.ID, Content: tool.Cap(out.Output, a.OutputCap)})
+			results = append(results, llm.ToolResult{CallID: c.ID, Content: tool.Cap(out.Output, a.OutputCap), Images: out.Images})
 		}
 	}
 	return results, ctx.Err()

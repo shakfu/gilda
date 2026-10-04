@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/shakfu/gilda/app"
 	"github.com/shakfu/gilda/permission"
 	"github.com/shakfu/gilda/price"
 	"github.com/shakfu/gilda/provider"
@@ -25,6 +26,8 @@ var commands = []command{
 	{"/permissions", "[mode]", "auto, ask, all or read-only; see /help"},
 	{"/thinking", "", "show or hide reasoning as it streams"},
 	{"/clear", "", "start a new conversation; session cost is kept"},
+	{"/sessions", "", "list the conversations saved for this directory"},
+	{"/resume", "[id]", "continue a saved conversation; without an id, pick one"},
 	{"/cost", "", "session tokens and cost"},
 	{"/copy", "", "copy the last answer to the clipboard"},
 	{"/help", "", "list commands and keys"},
@@ -42,7 +45,7 @@ func (m *model) command(text string) tea.Cmd {
 	name, arg := fields[0], strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
 	// /models is async too; one background step at a time keeps busy owned by a single step.
 	mutates := name == "/model" || name == "/models" || name == "/provider" || name == "/effort" ||
-		name == "/clear" || name == "/permissions"
+		name == "/clear" || name == "/permissions" || name == "/resume"
 	if mutates && (m.running || m.busy != "") {
 		m.out(m.st.Warn.Render(name + " waits for the current turn; press Esc to cancel it"))
 		return nil
@@ -65,10 +68,38 @@ func (m *model) command(text string) tea.Cmd {
 		m.out(m.st.Dim.Render("  asks in auto and ask and is refused in read-only. a at a prompt never covers"))
 		m.out(m.st.Dim.Render("  secrets or protected paths"))
 	case "/clear":
-		m.app.Agent.Reset()
+		m.app.Reset()
 		m.used = 0
 		clear(m.always)
 		m.out(m.st.Dim.Render("new conversation"))
+	case "/sessions":
+		list, err := app.Sessions(m.app.State.Dir(), m.app.Root())
+		switch {
+		case err != nil:
+			m.out(m.st.Error.Render("error: " + err.Error()))
+		case len(list) == 0:
+			m.out(m.st.Dim.Render("no saved sessions for this directory"))
+		}
+		for _, s := range list {
+			m.out(m.st.Dim.Render("  " + sessionItem(s)))
+		}
+	case "/resume":
+		if arg != "" {
+			return m.resume(arg)
+		}
+		list, err := app.Sessions(m.app.State.Dir(), m.app.Root())
+		if err != nil || len(list) == 0 {
+			m.out(m.st.Dim.Render("no saved sessions for this directory"))
+			return nil
+		}
+		var items []string
+		for _, s := range list {
+			items = append(items, sessionItem(s))
+		}
+		m.picker = newPicker("resume", items, "", func(s string) tea.Cmd {
+			return m.resume(strings.Fields(s)[0])
+		})
+		return nil
 	case "/cost":
 		m.out(m.st.Dim.Render(m.sessionLine()))
 	case "/copy":
@@ -132,6 +163,28 @@ func (m *model) command(text string) tea.Cmd {
 		return m.switchTo(arg, "")
 	default:
 		m.out(m.st.Error.Render("unknown command " + name + "; /help lists them"))
+	}
+	return nil
+}
+
+// sessionItem is one line describing a saved session; the id comes first.
+func sessionItem(s app.SessionInfo) string {
+	return fmt.Sprintf("%s  %s  %d msgs  %s", s.ID, s.Updated.Local().Format("2006-01-02 15:04"), s.Messages, s.Title)
+}
+
+func (m *model) resume(id string) tea.Cmd {
+	info, warns, err := m.app.Load(id)
+	if err != nil {
+		m.out(m.st.Error.Render("error: " + err.Error()))
+		return nil
+	}
+	clear(m.always)
+	m.resumedLines()
+	for _, w := range warns {
+		m.out(m.st.Warn.Render("warning: " + w.Error()))
+	}
+	if info.Provider != m.provider || info.Model != m.modelID {
+		m.out(m.st.Dim.Render(fmt.Sprintf("  saved with %s/%s; /model %s:%s replays its reasoning", info.Provider, info.Model, info.Provider, info.Model)))
 	}
 	return nil
 }

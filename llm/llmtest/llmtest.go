@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/shakfu/gilda/llm"
 )
 
 // Server replies to each POST with the next script, in order, and records the request bodies.
@@ -95,3 +97,33 @@ func Get(v any, path ...any) any {
 	}
 	return v
 }
+
+// Restore passes m's Native payload through codec, as saving and resuming a session does.
+func Restore(t *testing.T, codec llm.NativeCodec, m llm.Message) llm.Message {
+	t.Helper()
+	raw, err := codec.Encode(m.Native.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := codec.Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := *m.Native
+	n.Data = data
+	m.Native = &n
+	return m
+}
+
+// ImageHistory is a prompt, a call to read and a result that carries one PNG image.
+func ImageHistory(callID string) []llm.Message {
+	return []llm.Message{
+		{Role: llm.User, Text: "look"},
+		{Role: llm.Assistant, Calls: []llm.ToolCall{{ID: callID, Name: "read", Arguments: `{"path":"a.png"}`}}},
+		{Role: llm.Tool, Results: []llm.ToolResult{{CallID: callID, Content: "a.png is a PNG image",
+			Images: []llm.Image{{MediaType: "image/png", Data: []byte("PNGDATA")}}}}},
+	}
+}
+
+// PNGDataURL is the data URL of ImageHistory's image.
+const PNGDataURL = "data:image/png;base64,UE5HREFUQQ=="

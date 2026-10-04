@@ -147,7 +147,8 @@ func (t target) check(r *os.Root, before []byte) error {
 	if err != nil || !t.same(info) {
 		return t.changed()
 	}
-	data, err := io.ReadAll(f)
+	// One byte more than before is enough to tell a longer file apart.
+	data, err := io.ReadAll(io.LimitReader(f, int64(len(before))+1))
 	if err != nil {
 		return err
 	}
@@ -188,10 +189,63 @@ func (t target) write(data, before []byte) error {
 		f.Close()
 		return err
 	}
+	// The rename replaces the file, so its owner is copied where the user may set it, as when
+	// running as root. ACLs, extended attributes and hard links are not kept.
+	if t.file != nil {
+		if st, ok := t.file.Sys().(*syscall.Stat_t); ok {
+			_ = f.Chown(int(st.Uid), int(st.Gid))
+		}
+	}
+	// Synced before the rename, so a crash leaves the old file or the new one, never an empty one.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return r.Rename(tmp, base)
+	if err := r.Rename(tmp, base); err != nil {
+		return err
+	}
+	// The directory holds the rename; syncing it makes the rename survive a crash too.
+	if d, err := r.Open("."); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
+	return nil
+}
+
+// EditMax bounds the file edit and apply_patch change, in bytes; each holds it twice in memory.
+const EditMax = 16 << 20
+
+// readForEdit reads a file edit or apply_patch is about to change, refusing one over EditMax.
+func readForEdit(f *os.File, info fs.FileInfo, name string) ([]byte, error) {
+	if info.Size() > EditMax {
+		return nil, fmt.Errorf("%s is %s, over the %d MiB edit and apply_patch change; use bash",
+			name, plural(int(info.Size()), "byte"), EditMax>>20)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, EditMax+1))
+	if err == nil && len(data) > EditMax {
+		err = fmt.Errorf("%s grew past %d MiB while it was read", name, EditMax>>20)
+	}
+	return data, err
+}
+
+// remove deletes the file, failing unless it is still the one bound and, when before is not
+// nil, still holds before.
+func (t target) remove(before []byte) error {
+	if t.file == nil {
+		return fmt.Errorf("%s does not exist", t.name)
+	}
+	r, err := t.openRoot()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if err := t.check(r, before); err != nil {
+		return err
+	}
+	return r.Remove(t.rest[len(t.rest)-1])
 }
 
 // paths are what approval checks: the path as the call gave it and as bound, when they differ.

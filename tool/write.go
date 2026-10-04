@@ -63,6 +63,12 @@ func (w Write) Bind(raw json.RawMessage) (Tool, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A new file needs no read; replacing one the model has not seen loses its content.
+	if t.file != nil {
+		if err := w.Seen.check(t.path, t.file, a.Path, "replacing"); err != nil {
+			return nil, err
+		}
+	}
 	return boundWrite{w, a, t}, nil
 }
 
@@ -90,6 +96,7 @@ func (b boundWrite) Run(context.Context, json.RawMessage) (Result, error) {
 	if err := b.target.write([]byte(b.args.Content), nil); err != nil {
 		return Result{}, err
 	}
+	b.Seen.recordPath(b.target.path)
 	size := plural(len(b.args.Content), "byte")
 	return Result{Output: "wrote " + size + " to " + b.args.Path, Summary: size}, nil
 }

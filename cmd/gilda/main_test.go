@@ -46,7 +46,12 @@ func testEnv(extra ...string) []string {
 // and the exit status.
 func gilda(t *testing.T, script string, args ...string) (string, string, int) {
 	t.Helper()
-	dir := t.TempDir()
+	return gildaIn(t, t.TempDir(), script, args...)
+}
+
+// gildaIn is gilda in dir, so runs can share state.
+func gildaIn(t *testing.T, dir, script string, args ...string) (string, string, int) {
+	t.Helper()
 	if script != "" {
 		if err := os.WriteFile(filepath.Join(dir, "mock.json"), []byte(script), 0o644); err != nil {
 			t.Fatal(err)
@@ -370,5 +375,33 @@ func TestUntrustedCheckoutUsesAsk(t *testing.T) {
 		if strings.Contains(string(data), "trust") {
 			t.Errorf("an unanswered question was recorded: %s", data)
 		}
+	}
+}
+
+// A -p run saves its session; -c resumes it, and --sessions lists it.
+func TestSessionsResume(t *testing.T) {
+	dir := t.TempDir()
+	answer := `[{"text": "first answer"}]`
+	stdout, stderr, code := gildaIn(t, dir, answer, "-p", "one", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	var last map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		_ = json.Unmarshal([]byte(line), &last)
+	}
+	id, _ := last["session_id"].(string)
+	if id == "" {
+		t.Fatalf("result has no session_id: %v", last)
+	}
+	if _, stderr, code := gildaIn(t, dir, `[{"text": "second answer"}]`, "-c", "-p", "two"); code != 0 {
+		t.Fatalf("continue: exit %d: %s", code, stderr)
+	}
+	stdout, _, code = gildaIn(t, dir, "", "--sessions")
+	if code != 0 || !strings.Contains(stdout, id) || !strings.Contains(stdout, "4 msgs") || !strings.Contains(stdout, "  one") {
+		t.Fatalf("sessions: %q", stdout)
+	}
+	if _, stderr, code := gildaIn(t, dir, answer, "--resume", "nope", "-p", "x"); code == 0 || !strings.Contains(stderr, "no saved session") {
+		t.Fatalf("unknown id: exit %d %q", code, stderr)
 	}
 }

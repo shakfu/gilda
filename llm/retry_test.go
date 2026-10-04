@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestTransportReportsRetries(t *testing.T) {
@@ -69,5 +70,24 @@ func TestLogOmitsRequestBodiesAndHeaders(t *testing.T) {
 	}
 	if strings.Contains(got, "sk-secret") || strings.Contains(got, "secret prompt") {
 		t.Errorf("log leaked the request:\n%s", got)
+	}
+}
+
+// A server that accepts a request and never answers ends it, instead of hanging a -p run.
+func TestASilentServerTimesOut(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+	c := &http.Client{Transport: Transport(WaitingTransport(50 * time.Millisecond))}
+	start := time.Now()
+	_, err := c.Get(srv.URL)
+	if err == nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("err %v after %v", err, time.Since(start))
+	}
+	if HTTPClient.Transport.(retryTransport).base.(*http.Transport).ResponseHeaderTimeout != HeaderTimeout {
+		t.Fatal("the shared client does not wait HeaderTimeout")
 	}
 }

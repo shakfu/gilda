@@ -142,6 +142,8 @@ func TestDecliningTrustSwitchesToAsk(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := newModel(context.Background(), a, Options{})
+	// Answering starts the queued prompt, whose goroutine saves the session into dir.
+	defer m.tasks.wait()
 	m.Update(prepMsg{})
 	if m.trust != dir || m.busy == "" {
 		t.Fatalf("no trust question: %q", m.trust)
@@ -402,5 +404,35 @@ func TestTableStreams(t *testing.T) {
 	m.endText()
 	if got := ansi.Strip(strings.Join(m.lines, "\n")); got != "| a | b  |\n|---|----|\n| 1 | 22 |" {
 		t.Errorf("got\n%s", got)
+	}
+}
+
+// A turn that ran past notifyAfter rings when it ends or waits; a short one, or notify = off,
+// stays quiet.
+func TestLongTurnsGetAttention(t *testing.T) {
+	for setting, want := range map[string]any{"": "\a", "[repl]\nnotify = \"osc9\"\n": "\x1b]9;gilda: done\a", "[repl]\nnotify = \"off\"\n": nil} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "settings.toml"), []byte(setting), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		a, err := app.New(app.Options{Mock: "../mock/say-hi.json", Root: dir, StateDir: dir, CacheDir: dir, ConfigDir: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := newModel(context.Background(), a, Options{})
+		m.running, m.started = true, time.Now().Add(-time.Minute)
+		var got any
+		if cmd := m.notify("done"); cmd != nil {
+			got = cmd().(tea.RawMsg).Msg
+		}
+		if got != want {
+			t.Errorf("%q: got %q", setting, got)
+		}
+		if setting == "" {
+			m.started = time.Now()
+			if m.notify("done") != nil {
+				t.Error("a short turn rang")
+			}
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package price
 
 import (
+	"encoding/json"
 	"math"
 	"slices"
 	"testing"
@@ -94,5 +95,26 @@ func TestTierOrderDoesNotMatter(t *testing.T) {
 				t.Errorf("tiers %v, input %d: cost %g, want %g", tiers, input, got, want)
 			}
 		}
+	}
+}
+
+func TestImagesFollowTheListedModalities(t *testing.T) {
+	cat := FromModels([]components.Model{
+		{ID: "a/vision", Architecture: components.ModelArchitecture{InputModalities: []components.InputModality{"text", "image"}}},
+		{ID: "a/text", Architecture: components.ModelArchitecture{InputModalities: []components.InputModality{"text"}}},
+	})
+	if ok, known := cat.Models["a/vision"].Images(); !ok || !known {
+		t.Fatal("vision model")
+	}
+	if ok, known := cat.Models["a/text"].Images(); ok || !known {
+		t.Fatal("text model")
+	}
+	// A list cached before modalities were recorded says nothing.
+	var old Catalog
+	if err := json.Unmarshal([]byte(`{"models":{"a/b":{"context":1}}}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if _, known := old.Models["a/b"].Images(); known {
+		t.Fatal("an old entry claimed to know")
 	}
 }

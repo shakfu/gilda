@@ -1,0 +1,3 @@
+prompt = "Which function in this repository checks whether an email address is valid? Answer with the function's name only."
+check = 'grep -qw isValidAddress "$GILDA_ANSWER"'
+tools = ["read"]

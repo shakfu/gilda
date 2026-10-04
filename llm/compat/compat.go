@@ -111,8 +111,16 @@ func params(req llm.Request) sdk.ChatCompletionNewParams {
 		case llm.User:
 			msgs = append(msgs, sdk.UserMessage(m.Text))
 		case llm.Tool:
+			parts := []sdk.ChatCompletionContentPartUnionParam{sdk.TextContentPart(llm.ImagesIntro)}
 			for _, r := range m.Results {
 				msgs = append(msgs, sdk.ToolMessage(r.Content, r.CallID))
+				for _, img := range r.Images {
+					parts = append(parts, sdk.ImageContentPart(sdk.ChatCompletionContentPartImageImageURLParam{URL: img.DataURL()}))
+				}
+			}
+			// Chat Completions takes images only in user messages, so they follow the results.
+			if len(parts) > 1 {
+				msgs = append(msgs, sdk.UserMessage(parts))
 			}
 		case llm.Assistant:
 			a := sdk.ChatCompletionAssistantMessageParam{}

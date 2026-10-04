@@ -1,0 +1,24 @@
+[
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "calls": [
+   {
+    "name": "write",
+    "arguments": {
+     "path": "count.sh",
+     "content": "#!/usr/bin/env bash\nfind \"$1\" -type f -name '*.txt' | wc -l\n"
+    }
+   }
+  ]
+ },
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "text": "Wrote count.sh."
+ }
+]

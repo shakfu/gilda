@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/aymanbagabas/go-udiff"
@@ -80,6 +79,7 @@ func (b boundEdit) Run(context.Context, json.RawMessage) (Result, error) {
 	if err := b.target.write([]byte(b.after), []byte(b.before)); err != nil {
 		return Result{}, err
 	}
+	b.Seen.recordPath(b.target.path)
 	summary := "1 replacement"
 	if b.n > 1 {
 		summary = fmt.Sprintf("%d replacements", b.n)
@@ -123,13 +123,16 @@ func (e Edit) apply(raw json.RawMessage) (change, error) {
 	if err != nil {
 		return change{}, err
 	}
-	data, err := io.ReadAll(f)
+	data, err := readForEdit(f, info, a.Path)
 	f.Close()
 	if err != nil {
 		return change{}, err
 	}
 	if t.file == nil || !t.same(info) {
 		return change{}, t.changed()
+	}
+	if err := e.Seen.check(t.path, info, a.Path, "editing"); err != nil {
+		return change{}, err
 	}
 	text := string(data)
 	old, repl := a.OldString, a.NewString

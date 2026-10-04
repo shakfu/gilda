@@ -151,7 +151,7 @@ func TestCommandsWithoutArgumentsOpenPickers(t *testing.T) {
 }
 
 func TestCommandsThatChangeTheAgentWaitForTheTurn(t *testing.T) {
-	for _, in := range []string{"/model mock", "/models", "/provider", "/effort high", "/clear", "/permissions ask"} {
+	for _, in := range []string{"/model mock", "/models", "/provider", "/effort high", "/clear", "/permissions ask", "/resume x"} {
 		m := testModel(t)
 		m.running = true
 		if out, _ := submit(m, in); !strings.Contains(out, "waits for the current turn") {
@@ -299,5 +299,42 @@ func TestPickerViewScrollsAndCuts(t *testing.T) {
 	last := lines[len(lines)-1]
 	if lines[1] != "  item-20" || ansi.StringWidth(last) > 39 || !strings.HasSuffix(last, "...") {
 		t.Errorf("last page:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSessionsAndResume(t *testing.T) {
+	m := testModel(t)
+	if out, _ := submit(m, "/sessions"); !strings.Contains(out, "no saved sessions") {
+		t.Fatalf("empty: %q", out)
+	}
+	if _, err := m.app.Agent.Run(context.Background(), "first prompt", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.app.Save(); err != nil {
+		t.Fatal(err)
+	}
+	id := m.app.Agent.SessionID
+	if out, _ := submit(m, "/sessions"); !strings.Contains(out, id) || !strings.Contains(out, "first prompt") {
+		t.Fatalf("list: %q", out)
+	}
+	submit(m, "/clear")
+	if len(m.app.Agent.History) != 0 {
+		t.Fatal("clear kept the history")
+	}
+	out, _ := submit(m, "/resume "+id[len("gilda-"):][:5])
+	if len(m.app.Agent.History) != 2 || m.app.Agent.SessionID != id || !strings.Contains(out, "resumed "+id) {
+		t.Fatalf("resume: %q, %d messages", out, len(m.app.Agent.History))
+	}
+	if out, _ := submit(m, "/resume nope"); !strings.Contains(out, "no saved session") {
+		t.Fatalf("unknown id: %q", out)
+	}
+	submit(m, "/clear")
+	submit(m, "/resume")
+	if m.picker == nil || len(m.picker.items) != 1 {
+		t.Fatalf("picker %+v", m.picker)
+	}
+	drive(m, func() tea.Msg { return tea.KeyPressMsg{Code: tea.KeyEnter} })
+	if m.app.Agent.SessionID != id {
+		t.Fatal("picking did not resume")
 	}
 }

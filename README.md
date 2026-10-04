@@ -21,31 +21,43 @@ Usage:
   gilda [flags]
 
 Flags:
-  -P, --provider ID        ID: anthropic, openai, openrouter, llamacpp,
-                           ollama, compat
-  -m, --model ID           model ID, or PROVIDER:ID
-  -p, --prompt PROMPT      answer one PROMPT and exit; - reads stdin
-  -C, --root DIR           working DIR (default: the current one)
-      --base-url URL       provider endpoint URL; needs --provider; turns
-                           off cost estimates
-      --api-key KEY        provider KEY; needs --provider; prefer GILDA_API_KEY
-      --permissions MODE   MODE for what runs without asking: auto, ask,
-                           all, read-only (default: mode in settings.toml,
-                           else auto). auto asks before touching secrets
-                           and writing outside the root or to protected paths
-      --effort LEVEL       reasoning LEVEL: low, medium, high, xhigh, max
-      --mock FILE          replay a scripted JSON conversation from FILE
-      --max-tokens N       cap each response at N output tokens (default:
-                           settings.toml, else 32000)
-      --max-turns N        allow N provider round-trips per prompt
-                           (default: settings.toml, else 64)
-      --context TOKENS     context window in TOKENS (default:
-                           settings.toml, else from the model list)
-      --json               with -p: print JSON lines, ending in a result record
-      --no-color           disable colour; also off when NO_COLOR is set
-      --refresh-models     refetch the price list, ignoring the cache
-  -h, --help               print this help
-  -v, --version            print the version
+  -P, --provider ID          ID: anthropic, openai, openrouter, llamacpp,
+                             ollama, compat
+  -m, --model ID             model ID, or PROVIDER:ID
+  -p, --prompt PROMPT        answer one PROMPT and exit; - reads stdin
+  -C, --root DIR             working DIR (default: the current one)
+      --base-url URL         provider endpoint URL; needs --provider;
+                             turns off cost estimates
+      --api-key KEY          provider KEY; needs --provider; prefer
+                             GILDA_API_KEY
+      --permissions MODE     MODE for what runs without asking: auto, ask,
+                             all, read-only (default: mode in
+                             settings.toml, else auto). auto asks before
+                             touching secrets and writing outside the root
+                             or to protected paths
+      --effort LEVEL         reasoning LEVEL: low, medium, high, xhigh, max
+      --mock FILE            replay a scripted JSON conversation from FILE
+      --max-tokens N         cap each response at N output tokens
+                             (default: settings.toml, else 32000)
+      --max-turns N          allow N provider round-trips per prompt
+                             (default: settings.toml, else 64)
+      --context TOKENS       context window in TOKENS (default:
+                             settings.toml, else from the model list)
+      --json                 with -p: print JSON lines, ending in a result
+                             record
+      --no-color             disable colour; also off when NO_COLOR is set
+      --tools NAMES          offer only these tool NAMES, such as
+                             read,bash (default: all)
+      --append-system TEXT   add TEXT to the end of the system prompt
+  -c, --continue             resume the newest session saved for the
+                             working directory
+      --resume ID            resume the session with this ID, or a unique
+                             prefix of it
+      --sessions             list the sessions saved for the working
+                             directory and exit
+      --refresh-models       refetch the price list, ignoring the cache
+  -h, --help                 print this help
+  -v, --version              print the version
 ```
 
 ## Providers
@@ -77,11 +89,11 @@ Start llama-server with `--jinja` so tool calls work.
 
 ## Features
 
-- **Tools:** 4. `read` returns numbered lines, 2000 at most, with `offset` and `limit`, and summarises a binary file instead of dumping it. `write` creates or replaces a file. `edit` replaces one exact string, or every one with `replace_all`. `bash` runs `bash -c` in its own process group, 120 s by default and 600 s at most. A result over 32 KiB keeps its first fifth and last four fifths.
+- **Tools:** 5, and `apply_patch` for OpenAI models. `read` returns numbered lines, 2000 at most, with `offset` and `limit`, and summarises a binary file instead of dumping it. On a directory it lists the entries, sorted, with `/` after a directory and `@` after a symlink, so `read-only` mode can explore without `bash`. A PNG, JPEG, GIF or WebP file up to 3 MiB is returned as an image, for a model that accepts images: one OpenRouter's list marks so, or one of the `anthropic` or `openai` models it does not list. Other models get a note in its place, and the image stays in the history for a later model that does. Ask the model to `read` a screenshot by its path. `edit`, and `write` over an existing file, refuse a file that `read` has not returned in this conversation, or one whose size or modification time changed since, such as after a formatter ran through `bash`; the model reads it again. Each edit or write records the file it leaves, so consecutive edits need no read between them. `write` creates or replaces a file. `edit` replaces one exact string, or every one with `replace_all`. `bash` runs `bash -c` in its own process group, 120 s by default and 600 s at most. `apply_patch` applies a patch in the format OpenAI's Codex models write: files added, updated, moved or deleted, each update as hunks of context and changed lines, matched exactly, then ignoring trailing whitespace, then ignoring indentation. It writes nothing unless every file applies, and shows the diff of each file on approval. It is offered when the provider is `openai`, or `openrouter` with an `openai/` model, and fixed for the session; `apply_patch = true` or `false` under `[tools]` overrides that. `task` runs a subagent on a self-contained research question and returns its final answer, so its searches and file contents stay out of the conversation. The subagent uses the same provider, model and permission mode, with `read` and `bash` only and no knowledge of the conversation. Its tool calls show marked `[task]` and ask as the caller's do, and its tokens and cost count in the session. It cannot call `task` itself. `task = false` under `[tools]` turns it off. A result over 32 KiB keeps its first fifth and last four fifths.
 
 - **REPL:** output goes to the terminal's scrollback. An input box and a status bar stay pinned below it. The bar shows the working directory, or a spinner, elapsed time and the current step, then the model, effort, context used and session cost. Assistant text streams as styled markdown, one line at a time; a table prints aligned once its last row arrives. Each tool call gets one line, such as `[tool] read main.go:1-80 -> 80 lines` or `[tool] $ go test -> exit 1: FAIL`. Each prompt ends with a usage line: context, tokens in with the cached share, tokens out, cost.
 
-- **Headless:** `-p` streams the answer to stdout and everything else to stderr. `--json` prints one record per line: `start`, `turn`, `tool_call`, `tool_result` and `retry`, then a final `result` with `outcome`, `text`, `error`, `turns`, `usage` and `context_used`. `outcome` is `complete`, `truncated` (cut at `max_tokens`), `error` or `cancelled`. Exit status 0 when complete or truncated, 1 on error, 2 on a usage error, 130 when cancelled. Plain-text stdout gets each response's text when the response ends, so a response resent after a cut stream prints once.
+- **Headless:** `-p` streams the answer to stdout and everything else to stderr. `--json` prints one record per line: `start`, `turn`, `tool_call`, `tool_result`, `retry`, `elided` and `task`, then a final `result` with `outcome`, `text`, `error`, `turns`, `usage` and `context_used`. `outcome` is `complete`, `truncated` (cut at `max_tokens`), `error` or `cancelled`. Exit status 0 when complete or truncated, 1 on error, 2 on a usage error, 130 when cancelled. Plain-text stdout gets each response's text when the response ends, so a response resent after a cut stream prints once.
 
 - **Network:** a response streams with no overall timeout, so a long answer is never cut off; Esc or Ctrl-C ends a stalled one. When a provider's SDK retries a request, the REPL's status bar and a `[retry] 1 after 503 Service Unavailable` line say why, as do `-p`'s stderr and a `retry` record in `--json`. Anthropic and OpenAI retry up to 4 times, the local providers twice, OpenRouter for up to a minute. A response cut off mid-stream is sent again by gilda itself, up to twice in a row; the cut response never enters the history. `GILDA_LOG=FILE` records each request's endpoint and status and the raw response stream, never request bodies or headers.
 
@@ -105,11 +117,15 @@ Start llama-server with `--jinja` so tool calls work.
 
 - **Instructions:** `AGENTS.md` from the config directory, then every `AGENTS.md` from the repository root down to the working directory, are appended to the system prompt. The nearest comes last. Outside a repository only the working directory's file is read.
 
-- **Skills:** `skills/<name>/SKILL.md` in the config directory, by the [Agent Skills](https://agentskills.io/specification) convention. The prompt lists each skill's path and frontmatter; the model reads the file when a task matches.
+- **Skills:** `skills/<name>/SKILL.md` in the config directory, then `.agents/skills/<name>/SKILL.md` at the repository root, by the [Agent Skills](https://agentskills.io/specification) convention. The prompt lists each skill's path and frontmatter; the model reads the file when a task matches. The repository directory is named after `AGENTS.md`; other agents may look elsewhere, such as `.claude/skills`.
+
+- **Environment:** the system prompt states the working directory, platform, shell, the date and the git branch, both as at session start. The branch is read from `.git/HEAD`, so no `git` process runs.
+
+- **Sessions:** each conversation is saved after every prompt, to `$XDG_STATE_HOME/gilda/sessions/ID.json` at mode 0600. `-c` resumes the newest session for the working directory, and `--resume ID` a given one; a unique prefix of the id is enough. `--sessions` lists them. The REPL prints the id when it exits, and `--json` puts it in the `result` record. A resumed session keeps the provider and model unless `-P` or `-m` names others. Reasoning payloads are saved too, so a resumed turn replays them to the same model. A session saved in another directory is refused, since its history names files there. When two instances resume one session, the second to save continues under a new id and says so, so neither overwrites the other. The newest 100 sessions are kept. A session holds whatever the tools printed, secrets included; `save = false` under `[session]` in `settings.toml` turns saving off.
 
 - **Cancellation:** Esc or Ctrl-C cancels a turn, including a pending request. Every tool call still gets a result, so the conversation stays valid.
 
-- **Context:** the window comes from `--context`, the provider's model list, llama-server's `n_ctx`, or OpenRouter's list. A request is refused once the last one filled 95% of it; `/clear` starts over. There is no compaction.
+- **Context:** the window comes from `--context`, the provider's model list, llama-server's `n_ctx`, or OpenRouter's list. Past 70%, tool results older than the last 4 tool messages are replaced by a one-line stub, `[gilda: elided N bytes of read output ...]`, and a `[context]` line says so. It is skipped when it would free under a tenth of the window, since each elision breaks the prompt cache once. Past 85%, the model is told once to wrap up. A request is refused once the last one filled 95%; `/clear` starts over. There is no summarising compaction.
 
 ### Permissions
 
@@ -161,7 +177,7 @@ Only names that nearly always hold credentials are built in, since a false posit
 
 #### Trust
 
-An `AGENTS.md` in a cloned repository instructs the agent, and `auto` runs `bash` without asking. So when the mode is `auto` by default or from `settings.toml`, gilda asks once per checkout whether to trust its `AGENTS.md` files, and saves the answer in `state.json`. Declining uses `ask` mode there, in this run and later ones. An explicit `--permissions` or `GILDA_PERMISSIONS` skips the question. With no one to answer, as under `--json` or without a terminal, the run uses `ask` and saves nothing.
+An `AGENTS.md` in a cloned repository instructs the agent, and `auto` runs `bash` without asking. So when the mode is `auto` by default or from `settings.toml`, gilda asks once per checkout whether to trust its `AGENTS.md` files and `.agents/skills`, and saves the answer in `state.json`. Declining uses `ask` mode there, in this run and later ones. An explicit `--permissions` or `GILDA_PERMISSIONS` skips the question. With no one to answer, as under `--json` or without a terminal, the run uses `ask` and saves nothing.
 
 #### Provider keys
 
@@ -232,6 +248,8 @@ read_lines = 2000      # lines one read returns
 read_line_bytes = 2000 # bytes kept of one line
 bash_timeout = 120     # seconds, when the call sets none
 bash_max_timeout = 600 # seconds a call may ask for
+apply_patch = true     # offer apply_patch; default: to OpenAI models only
+task = true            # offer the task tool, which runs a subagent
 
 [permissions]
 diff_max_bytes = 1048576 # bytes of the old file a write preview reads
@@ -242,6 +260,12 @@ skills = true          # skills' frontmatter in the system prompt
 
 [prices]
 fetch = true           # OpenRouter's price list, fetched once a day
+
+[session]
+save = true            # save conversations for --continue and --resume
+
+[repl]
+notify = "bell"        # after a turn of 30 s or more: bell, osc9 or off
 ```
 
 | Key | Affects |
@@ -269,6 +293,8 @@ The system prompt and tool descriptions are fixed for a session, so these settin
 | Ctrl-C | cancel the turn, else clear the input, else quit |
 | Ctrl-D | quit on an empty line |
 
+A turn that has run for 30 seconds rings the terminal bell when it ends or waits for an approval, so a user who switched away hears it. `notify = "osc9"` under `[repl]` sends a desktop notification instead, in terminals that support OSC 9, such as iTerm2 and WezTerm; under tmux it needs passthrough. `notify = "off"` turns both off.
+
 | Command | Does |
 |-|-|
 | `/model [id]` | switch model; without an id, pick from the provider's list |
@@ -277,7 +303,9 @@ The system prompt and tool descriptions are fixed for a session, so these settin
 | `/effort [level]` | `low`, `medium`, `high`, `xhigh`, `max` or `default`; remembered |
 | `/permissions [mode]` | `auto`, `ask`, `all` or `read-only`; without a mode, pick one |
 | `/thinking` | show or hide streamed reasoning |
-| `/clear` | new conversation; session cost is kept |
+| `/clear` | new conversation, saved as a new session; session cost is kept |
+| `/sessions` | list the conversations saved for this directory |
+| `/resume [id]` | continue a saved conversation, keeping the provider and model; without an id, pick one |
 | `/cost` | session tokens and cost |
 | `/help`, `/exit`, `/quit` | |
 
@@ -365,6 +393,8 @@ make repl       # REPL against the mock provider
 make help       # every target
 ```
 
+`go run ./scripts/eval -m MODEL evals/*` runs gilda on the scripted tasks in `evals/` and reports how many runs passed; `docs/dev/tools.md` shows A/B use.
+
 Adapter tests run each SDK against a local server that replays server-sent events. They check the request gilda sends (cache markers, tools, reasoning replay) and the parsing of the stream, with no key or network. `cmd/gilda` tests build the binary and check exit codes and JSON records.
 
 A mock script is a JSON array of responses, one per provider round-trip: `{"text", "reasoning", "calls": [{"name", "arguments"}], "usage", "stop", "error"}`. See `mock/`.
@@ -379,6 +409,7 @@ The binary is about 40 MB, mostly the three SDKs; startup takes about 10 ms. See
 | `$XDG_CONFIG_HOME/gilda/settings.toml` | permission mode, secrets, protected paths, command and host allowlists, approval diffs, limits |
 | `$XDG_STATE_HOME/gilda/state.json` | last provider, model per provider, effort |
 | `$XDG_STATE_HOME/gilda/history` | REPL history, verbatim, mode 0600 |
+| `$XDG_STATE_HOME/gilda/sessions/` | saved conversations, mode 0600; see Sessions |
 | `$XDG_CACHE_HOME/gilda/openrouter-models.json` | the price list |
 
 Unset XDG variables fall back to `~/.config`, `~/.local/state` and `~/.cache`.

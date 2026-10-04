@@ -7,6 +7,7 @@ package openrouter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -114,11 +115,25 @@ func (p *Provider) request(req llm.Request) components.ChatRequest {
 				Role:    components.ChatUserMessageRoleUser,
 			}))
 		case llm.Tool:
+			var images []components.ChatContentItems
 			for _, r := range m.Results {
 				msgs = append(msgs, components.CreateChatMessagesTool(components.ChatToolMessage{
 					Content:    components.CreateChatToolMessageContentStr(r.Content),
 					Role:       components.ChatToolMessageRoleTool,
 					ToolCallID: r.CallID,
+				}))
+				for _, img := range r.Images {
+					images = append(images, components.CreateChatContentItemsImageURL(components.ChatContentImage{
+						ImageURL: components.ChatContentImageImageURL{URL: img.DataURL()},
+					}))
+				}
+			}
+			// Chat Completions takes images only in user messages, so they follow the results.
+			if len(images) > 0 {
+				text := components.CreateChatContentItemsText(components.ChatContentText{Text: llm.ImagesIntro})
+				msgs = append(msgs, components.CreateChatMessagesUser(components.ChatUserMessage{
+					Content: components.CreateChatUserMessageContentArrayOfChatContentItems(append([]components.ChatContentItems{text}, images...)),
+					Role:    components.ChatUserMessageRoleUser,
 				}))
 			}
 		case llm.Assistant:
@@ -135,7 +150,8 @@ func (p *Provider) request(req llm.Request) components.ChatRequest {
 				})
 			}
 			if native, ok := m.NativeFor(p.name, req.Model); ok {
-				a.ReasoningDetails = native.([]components.ReasoningDetailUnion)
+				// A payload of another type, from an adapter sharing this name, is dropped.
+				a.ReasoningDetails, _ = native.([]components.ReasoningDetailUnion)
 			}
 			msgs = append(msgs, components.CreateChatMessagesAssistant(a))
 		}
@@ -348,4 +364,38 @@ func wrap(err error) error {
 		return errors.Join(llm.ErrContext, err)
 	}
 	return err
+}
+
+// Codec saves and restores the reasoning_details this adapter keeps in Native.
+var Codec llm.NativeCodec = codec{}
+
+type codec struct{}
+
+func (codec) Encode(data any) (json.RawMessage, error) {
+	v, ok := data.([]components.ReasoningDetailUnion)
+	if !ok {
+		return nil, fmt.Errorf("openrouter: native payload is %T", data)
+	}
+	return json.Marshal(v)
+}
+
+// Decode refuses anything but a list of typed items: the SDK's decoder accepts other JSON
+// without error and yields empty items, which the API would reject.
+func (codec) Decode(raw json.RawMessage) (any, error) {
+	var items []struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, err
+	}
+	for _, it := range items {
+		if it.Type == "" {
+			return nil, errors.New("openrouter: native payload has an untyped item")
+		}
+	}
+	var v []components.ReasoningDetailUnion
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }

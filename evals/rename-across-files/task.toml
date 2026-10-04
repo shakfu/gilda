@@ -1,0 +1,2 @@
+prompt = "Rename the function Sum in package calc to Total, everywhere it is defined or used. Keep everything building."
+check = "go build ./... && go vet ./... && ! grep -rn --include=*.go -w Sum . && go test ./..."

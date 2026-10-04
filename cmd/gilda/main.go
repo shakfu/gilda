@@ -32,6 +32,7 @@ type flags struct {
 	headless bool
 	json     bool
 	noColor  bool
+	sessions bool
 }
 
 // exitError carries an exit status out of cobra's RunE.
@@ -103,6 +104,11 @@ func main() {
 		"(default: settings.toml, else from the model list)")
 	fl.BoolVar(&f.json, "json", false, "with -p: print JSON lines, ending in a result record")
 	fl.BoolVar(&f.noColor, "no-color", false, "disable colour; also off when NO_COLOR is set")
+	fl.StringSliceVar(&f.Only, "tools", nil, "offer only these tool `NAMES`, such as read,bash (default: all)")
+	fl.StringVar(&f.AppendSystem, "append-system", "", "add `TEXT` to the end of the system prompt")
+	fl.BoolVarP(&f.Continue, "continue", "c", false, "resume the newest session saved for the working directory")
+	fl.StringVar(&f.Resume, "resume", "", "resume the session with this `ID`, or a unique prefix of it")
+	fl.BoolVar(&f.sessions, "sessions", false, "list the sessions saved for the working directory and exit")
 	fl.BoolVar(&f.Refresh, "refresh-models", false, "refetch the price list, ignoring the cache")
 	fl.SortFlags = false
 	cmd.Flags().BoolP("help", "h", false, "print this help")
@@ -130,6 +136,9 @@ func run(f flags) int {
 			return 2
 		}
 		f.Root, _ = os.Getwd()
+	}
+	if f.sessions {
+		return listSessions(os.Stdout, f.Root)
 	}
 	if f.prompt == "-" {
 		data, err := io.ReadAll(os.Stdin)
@@ -228,4 +237,25 @@ func checkEffort(e string) error {
 		return nil
 	}
 	return fmt.Errorf("--effort must be low, medium, high, xhigh or max")
+}
+
+// listSessions prints the sessions saved for root, newest first.
+func listSessions(w io.Writer, root string) int {
+	if root == "" {
+		root, _ = os.Getwd()
+	}
+	list, err := app.Sessions("", root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gilda:", err)
+		return 1
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(os.Stderr, "gilda: no saved sessions for", root)
+		return 0
+	}
+	for _, s := range list {
+		fmt.Fprintf(w, "%s  %s  %3d msgs  %s/%s  %s\n", s.ID, s.Updated.Local().Format("2006-01-02 15:04"),
+			s.Messages, s.Provider, s.Model, s.Title)
+	}
+	return 0
 }

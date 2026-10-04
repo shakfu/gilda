@@ -93,6 +93,9 @@ func headless(parent context.Context, a *app.App, prompt string, asJSON, color b
 		emit(e)
 	})
 	cancelled := errors.Is(err, context.Canceled) || ctx.Err() != nil
+	if serr := a.Save(); serr != nil && !asJSON {
+		fmt.Fprintln(os.Stderr, "gilda: warning: session:", serr)
+	}
 
 	if asJSON {
 		j.result(a, res, err, cancelled)
@@ -137,6 +140,8 @@ func textEvents(out, diag io.Writer, st tui.Styles) func(agent.Event) {
 		case agent.Retry:
 			held.Reset()
 			fmt.Fprintln(diag, st.Warn.Render(tui.RetryLine(e)))
+		case agent.Elided:
+			fmt.Fprintln(diag, st.Dim.Render(tui.ElidedLine(e)))
 		}
 	}
 }
@@ -159,7 +164,7 @@ func (j *jsonOut) write(v any) {
 // so its deltas are not printed.
 func (j *jsonOut) event(e agent.Event) {
 	switch e.(type) {
-	case agent.ToolCall, agent.ToolResult, agent.Retry, agent.Response:
+	case agent.ToolCall, agent.ToolResult, agent.Retry, agent.Response, agent.Elided, agent.TaskDone:
 		j.write(agent.Record(e))
 	}
 }
@@ -178,6 +183,7 @@ func (j *jsonOut) result(a *app.App, res agent.Result, err error, cancelled bool
 		"type": "result", "outcome": outcome, "text": res.Text, "error": errText,
 		"provider": a.ProviderID, "model": a.Agent.Model, "turns": res.Turns, "permissions": a.Mode(),
 		"usage": res.Usage, "context_used": a.Agent.Used, "context_window": a.Agent.Context,
+		"session_id": a.Agent.SessionID,
 	})
 }
 

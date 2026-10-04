@@ -1,6 +1,6 @@
 # Tools
 
-What makes a tool built in, how gilda reaches programs in the environment such as `rg`, `fzf` or `quarto`, and a design for tools declared in `settings.toml`. Written 2026-09-23. Only the section "What exists today" is implemented.
+What makes a tool built in, how gilda reaches programs in the environment such as `rg`, `fzf` or `quarto`, and a design for tools declared in `settings.toml`. Written 2026-09-23. Only the section "What exists today" is implemented, plus `apply_patch` for OpenAI models (see `CHANGELOG.md`).
 
 ## Terms
 
@@ -179,6 +179,14 @@ Make a tool built in when most of these hold:
 An alternative to B is teaching the permission layer about read-only programs: classify `rg PATTERN PATH` or `sed -n` inside `bash` as read-only. It needs no new tools, and it would catch what the GPT models did. It needs a per-program list of flags that write or execute (`sed -i`, `rg --pre`, `find -exec`), which is a larger and riskier surface than B's fixed argv.
 
 ## Measuring
+
+`scripts/eval` runs the tasks in `evals/` and checks whether each run succeeded; see its doc comment. Its run files are `--json` output, so `scripts/tally` reads them too:
+
+```sh
+go run ./scripts/eval -m openai:gpt-5.5 -n 3 -out evals/results/patch evals/*
+go run ./scripts/eval -m openai:gpt-5.5 -n 3 -settings nopatch.toml -out evals/results/nopatch evals/*
+go run ./scripts/tally evals/results/patch/*.jsonl
+```
 
 `scripts/tally` counts tool use in `--json` output, per model:
 

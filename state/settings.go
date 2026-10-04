@@ -36,6 +36,9 @@ const SettingsFile = "settings.toml"
 //	[prices]
 //	fetch = false
 //
+//	[session]
+//	save = false
+//
 // The mode applies when neither --permissions nor GILDA_PERMISSIONS sets one; max_tokens,
 // max_turns and context apply when their flags are not given. The patterns add to the built-in
 // ones and cannot lift them. A key left out takes gilda's default.
@@ -45,6 +48,20 @@ type Settings struct {
 	Tools       Tools       `toml:"tools"`
 	Prompt      Prompt      `toml:"prompt"`
 	Prices      Prices      `toml:"prices"`
+	Session     Session     `toml:"session"`
+	REPL        REPL        `toml:"repl"`
+}
+
+// REPL sets how the REPL gets the user's attention when a long turn ends or needs an approval:
+// "bell", "osc9" (a desktop notification in terminals that support it) or "off". Empty means
+// bell.
+type REPL struct {
+	Notify string `toml:"notify"`
+}
+
+// Session says whether conversations are saved for --continue and --resume. Nil means on.
+type Session struct {
+	Save *bool `toml:"save"`
 }
 
 // Agent bounds a prompt's round-trips. See agent.Config.
@@ -64,6 +81,10 @@ type Tools struct {
 	BashMaxTimeout *int `toml:"bash_max_timeout"`
 	// BashEnv names provider key variables that bash still receives; see app.HiddenEnv.
 	BashEnv []string `toml:"bash_env"`
+	// ApplyPatch offers apply_patch alongside edit; nil offers it to OpenAI models only.
+	ApplyPatch *bool `toml:"apply_patch"`
+	// Task offers the task tool, which runs a subagent; nil means on.
+	Task *bool `toml:"task"`
 }
 
 // Prompt says what goes into the system prompt besides gilda's own text. Nil means on.
@@ -147,6 +168,11 @@ func (s Settings) validate() error {
 		if c.v != nil && *c.v < c.min {
 			return fmt.Errorf("%s must be at least %d", c.key, c.min)
 		}
+	}
+	switch s.REPL.Notify {
+	case "", "bell", "osc9", "off":
+	default:
+		return fmt.Errorf("repl.notify must be bell, osc9 or off, not %q", s.REPL.Notify)
 	}
 	for _, name := range s.Tools.BashEnv {
 		if name == "" || strings.ContainsAny(name, "= ") {

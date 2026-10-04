@@ -58,6 +58,15 @@ type Options struct {
 	// permission modes through tool.ReadOnly and tool.Paths; tool.New builds one from
 	// functions. Names must be unique.
 	Tools []tool.Tool
+	// Only, when set, keeps just the named tools, built-in or custom.
+	Only []string
+	// AppendSystem is added to the end of the system prompt.
+	AppendSystem string
+	// Continue resumes the newest session saved for Root; Resume resumes the session with that
+	// id, or a unique prefix of it. Either takes the session's provider and model unless
+	// Provider or Model is set.
+	Continue bool
+	Resume   string
 	// Rules add secret and protected paths to the built-in ones and to those in the config
 	// directory's settings.toml. They form their own layer: a "!" here exempts only patterns
 	// given here.
@@ -69,7 +78,9 @@ type App struct {
 	// ProviderID names the registry entry, or "mock".
 	ProviderID string
 	Jobs       *tool.Jobs
-	State      state.State
+	// Seen records what read returned, for edit and write; see tool.Seen.
+	Seen  *tool.Seen
+	State state.State
 
 	opts     Options
 	fixedCtx bool
@@ -83,6 +94,22 @@ type App struct {
 	diff       bool
 	// fetchPrices is false when settings.toml turns off the price list.
 	fetchPrices bool
+	// saveSessions is false when settings.toml sets session.save = false. created is when the
+	// current session was first saved; zero until then.
+	saveSessions bool
+	created      time.Time
+	// saved is the Updated time of the session file as this App last wrote or read it.
+	saved time.Time
+	// warns are reported by Prepare.
+	warns []error
+	// applyPatch is tools.apply_patch from settings.toml; nil decides by provider.
+	applyPatch *bool
+	// task is tools.task from settings.toml. env is what the built-in tools share.
+	task bool
+	env  tool.Env
+	// promptOpts says what the system prompt includes, for the trust question.
+	promptOpts prompt.Options
+	notify     string
 
 	mu     sync.Mutex
 	prices *price.Catalog
@@ -100,6 +127,9 @@ func New(opts Options) (*App, error) {
 			return nil, err
 		}
 		opts.Root = wd
+	}
+	if abs, err := filepath.Abs(opts.Root); err == nil {
+		opts.Root = abs
 	}
 	for id := range opts.Keys {
 		if _, ok := provider.Find(id); !ok {
@@ -180,13 +210,33 @@ func New(opts Options) (*App, error) {
 	if opts.CacheDir == "" {
 		opts.CacheDir = state.CacheDir()
 	}
-	a := &App{opts: opts, State: state.Load(opts.StateDir), Jobs: &tool.Jobs{}, models: map[string][]llm.Model{}, diff: diff, fetchPrices: fetchPrices}
+	saved := state.Load(opts.StateDir)
+	var resumed *session
+	if opts.Continue || opts.Resume != "" {
+		if opts.Continue && opts.Resume != "" {
+			return nil, fmt.Errorf("--continue and --resume are exclusive")
+		}
+		if resumed, err = findSession(saved.Dir(), opts.Root, opts.Resume); err != nil {
+			return nil, err
+		}
+		if opts.Provider == "" && opts.Model == "" && opts.Mock == "" {
+			opts.Provider, opts.Model = resumed.Provider, resumed.Model
+		}
+	}
+	a := &App{opts: opts, State: saved, Jobs: &tool.Jobs{}, Seen: &tool.Seen{}, models: map[string][]llm.Model{}, diff: diff,
+		fetchPrices: fetchPrices, saveSessions: state.Or(settings.Session.Save, true)}
 	if opts.Effort == "" {
 		opts.Effort = a.State.Effort
 	}
+	env := tool.Env{Root: opts.Root, Jobs: a.Jobs, Limits: limits, Hide: HiddenEnv(st.BashEnv), Seen: a.Seen}
+	a.applyPatch, a.env, a.task = st.ApplyPatch, env, state.Or(st.Task, true)
+	a.notify = settings.REPL.Notify
+	if a.notify == "" {
+		a.notify = "bell"
+	}
 	cfg := agent.Config{
-		System:        prompt.Build(opts.Root, opts.ConfigDir, promptOpts),
-		Tools:         append(tool.Default(tool.Env{Root: opts.Root, Jobs: a.Jobs, Limits: limits, Hide: HiddenEnv(st.BashEnv)}), opts.Tools...),
+		System:        withAppended(prompt.Build(opts.Root, opts.ConfigDir, promptOpts), opts.AppendSystem),
+		Tools:         append(tool.Default(env), opts.Tools...),
 		MaxTokens:     opts.MaxTokens,
 		MaxTurns:      opts.MaxTurns,
 		StreamRetries: retries,
@@ -199,8 +249,9 @@ func New(opts Options) (*App, error) {
 		return nil, err
 	}
 	a.fixedCtx = opts.Context > 0
-	if !explicit && mode == permission.Auto && !promptOpts.NoAgents {
-		if dir, files := checkout(opts.Root); len(files) > 0 {
+	a.promptOpts = promptOpts
+	if !explicit && mode == permission.Auto {
+		if dir, files := checkout(opts.Root, promptOpts); len(files) > 0 {
 			trusted, answered := a.State.Trust[dir]
 			switch {
 			case !answered:
@@ -220,6 +271,16 @@ func New(opts Options) (*App, error) {
 		}
 		cfg.Provider, cfg.Model, a.ProviderID = p, "mock", "mock"
 		a.Agent = agent.New(cfg)
+		if err := a.addPatch(env); err != nil {
+			return nil, err
+		}
+		if err := a.addTask(); err != nil {
+			return nil, err
+		}
+		if err := a.keepOnly(opts.Only); err != nil {
+			return nil, err
+		}
+		a.resume(resumed)
 		return a, nil
 	}
 
@@ -239,16 +300,130 @@ func New(opts Options) (*App, error) {
 	a.ProviderID = id
 	a.Agent = agent.New(cfg)
 	a.Agent.Model = a.defaultModel(id, opts.Model)
+	if err := a.addPatch(env); err != nil {
+		return nil, err
+	}
+	if err := a.addTask(); err != nil {
+		return nil, err
+	}
+	if err := a.keepOnly(opts.Only); err != nil {
+		return nil, err
+	}
+	a.resume(resumed)
 	return a, nil
+}
+
+// keepOnly drops every tool not named; no names keeps all. An editing tool without read is
+// refused, since it changes only files read has returned.
+func (a *App) keepOnly(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	var kept []tool.Tool
+	for _, n := range names {
+		t := tool.Find(a.Agent.Tools, n)
+		if t == nil {
+			var all []string
+			for _, t := range a.Agent.Tools {
+				all = append(all, t.Spec().Name)
+			}
+			return fmt.Errorf("--tools: no tool %q; the tools are %s", n, strings.Join(all, ", "))
+		}
+		if tool.Find(kept, n) == nil {
+			kept = append(kept, t)
+		}
+	}
+	if tool.Find(kept, "read") == nil {
+		for _, n := range []string{"edit", "apply_patch"} {
+			if tool.Find(kept, n) != nil {
+				return fmt.Errorf("--tools: %s needs read, since it changes only files the model has read", n)
+			}
+		}
+	}
+	a.Agent.Tools = kept
+	return nil
+}
+
+// withAppended adds the caller's instructions after gilda's system prompt.
+func withAppended(system, extra string) string {
+	if strings.TrimSpace(extra) == "" {
+		return system
+	}
+	return system + "\n# Additional instructions\n\n" + strings.TrimSpace(extra) + "\n"
+}
+
+// addPatch offers apply_patch after the built-in tools when settings.toml says so, or by
+// default to an OpenAI model, which is trained on it. The choice holds for the session, since
+// changing the tool list mid-session would drop the prompt cache.
+func (a *App) addPatch(env tool.Env) error {
+	on := a.ProviderID == "openai" || a.ProviderID == "openrouter" && strings.HasPrefix(a.Agent.Model, "openai/")
+	if a.applyPatch != nil {
+		on = *a.applyPatch
+	}
+	if !on {
+		return nil
+	}
+	a.insertTool(tool.Patch{Env: env})
+	return tool.Check(a.Agent.Tools)
+}
+
+// insertTool puts t after the built-in tools added so far, before the app's own.
+func (a *App) insertTool(t tool.Tool) {
+	n := len(a.Agent.Tools) - len(a.opts.Tools)
+	tools := append(slices.Clone(a.Agent.Tools[:n]), t)
+	a.Agent.Tools = append(tools, a.Agent.Tools[n:]...)
+}
+
+// addTask offers the task tool unless settings.toml turns it off.
+func (a *App) addTask() error {
+	if !a.task {
+		return nil
+	}
+	a.insertTool(agent.Task{New: a.subagent})
+	return tool.Check(a.Agent.Tools)
+}
+
+// subagent builds the agent one task call runs: the caller's provider, model, limits and
+// approvals as they are now, read and bash only, and a read record of its own, so the caller
+// cannot edit a file only the subagent has read.
+func (a *App) subagent() *agent.Agent {
+	env := a.env
+	env.Seen = &tool.Seen{}
+	cfg := a.Agent.Config
+	cfg.System = a.Agent.System + "\n" + agent.TaskPrompt + "\n"
+	cfg.Tools = []tool.Tool{tool.Read{Env: env}, tool.Bash{Env: env}}
+	cfg.SessionID = a.Agent.SessionID + "-task"
+	return agent.New(cfg)
+}
+
+// resume loads a saved session into the agent; nil does nothing.
+func (a *App) resume(s *session) {
+	if s == nil {
+		return
+	}
+	history, dropped := s.restore()
+	a.Agent.History, a.Agent.Used, a.Agent.SessionID, a.created, a.saved = history, s.Used, s.ID, s.Created, s.Updated
+	if dropped > 0 {
+		a.warns = append(a.warns, fmt.Errorf("session %s: reasoning of %d messages could not be restored; they resume as text", s.ID, dropped))
+	}
+}
+
+// Reset starts a new conversation, saved as a new session. Session usage is kept.
+func (a *App) Reset() {
+	a.Agent.Reset()
+	a.Seen.Reset()
+	a.Agent.SessionID = newSessionID()
+	a.created, a.saved = time.Time{}, time.Time{}
 }
 
 // Prepare loads the price list and resolves the context window and, for a local server, the
 // model. It returns an error when the provider lists models and the chosen one is not among
 // them. Other failures cost only estimates, so they come back as warnings.
 func (a *App) Prepare(ctx context.Context) ([]error, error) {
-	var warns []error
+	warns := a.warns
+	a.warns = nil
 	if a.ProviderID == "mock" {
-		return nil, nil
+		return warns, nil
 	}
 	e, _ := provider.Find(a.ProviderID)
 	if a.Agent.Model == "" {
@@ -279,8 +454,10 @@ func (a *App) Prepare(ctx context.Context) ([]error, error) {
 	return warns, nil
 }
 
-// resolveContext sets the window from the provider's listing, then OpenRouter's.
+// resolveContext sets the window from the provider's listing, then OpenRouter's, and whether
+// the model accepts images.
 func (a *App) resolveContext(ctx context.Context) {
+	a.Agent.Images = a.acceptsImages()
 	if a.fixedCtx {
 		return
 	}
@@ -298,6 +475,19 @@ func (a *App) resolveContext(ctx context.Context) {
 	if e, ok := a.prices.Lookup(a.ProviderID, a.Agent.Model); ok {
 		a.Agent.Context = e.Context
 	}
+}
+
+// acceptsImages reports whether the current model takes images, from OpenRouter's list. A model
+// the list does not name is taken to accept them on the vendor APIs, whose chat models do, and
+// not elsewhere: a local server or an unknown OpenRouter model would reject every later request.
+func (a *App) acceptsImages() bool {
+	a.mu.Lock()
+	e, listed := a.prices.Lookup(a.ProviderID, a.Agent.Model)
+	a.mu.Unlock()
+	if ok, known := e.Images(); listed && known {
+		return ok
+	}
+	return a.ProviderID == "anthropic" || a.ProviderID == "openai"
 }
 
 // Models lists the current provider's models, sorted by id, cached for the session.
@@ -436,6 +626,9 @@ func (a *App) HasKey(id string) bool {
 	return ok && (e.Local() || a.opts.Keys[id] != "" || e.Key() != "")
 }
 
+// Notify is how the REPL gets attention after a long turn: bell, osc9 or off.
+func (a *App) Notify() string { return a.notify }
+
 // ConfigDir is where the user's AGENTS.md and skills are read from.
 func (a *App) ConfigDir() string { return a.opts.ConfigDir }
 
@@ -535,9 +728,9 @@ func SplitModel(s string) (string, string, bool) {
 	return p, m, true
 }
 
-// checkout returns the repository holding root, or root outside one, and the AGENTS.md files
-// it adds to the system prompt.
-func checkout(root string) (string, []string) {
+// checkout returns the repository holding root, or root outside one, and the files from it
+// that the system prompt includes: AGENTS.md files and the repository's skills.
+func checkout(root string, o prompt.Options) (string, []string) {
 	dir, err := filepath.Abs(root)
 	if err != nil {
 		return "", nil
@@ -545,10 +738,19 @@ func checkout(root string) (string, []string) {
 	if r := prompt.RepoRoot(dir); r != "" {
 		dir = r
 	}
-	return dir, prompt.AgentsFiles(root, "")
+	var files []string
+	if !o.NoAgents {
+		files = prompt.AgentsFiles(root, "")
+	}
+	if !o.NoSkills {
+		for _, s := range prompt.Skills(prompt.ProjectSkillsDir(root)) {
+			files = append(files, s.Path)
+		}
+	}
+	return dir, files
 }
 
-// Trust returns a directory whose AGENTS.md files, listed, would instruct an agent that runs
+// Trust returns a directory whose AGENTS.md files and skills, listed, would instruct an agent that runs
 // bash without asking, when the user has not yet said whether to trust it. It returns "" when
 // no answer is needed: the mode was set explicitly, is not auto, or the directory was answered
 // before. A cloned repository could otherwise direct the agent before the user has read it.
@@ -556,7 +758,7 @@ func (a *App) Trust() (string, []string) {
 	if a.trustDir == "" {
 		return "", nil
 	}
-	_, files := checkout(a.opts.Root)
+	_, files := checkout(a.opts.Root, a.promptOpts)
 	return a.trustDir, files
 }
 

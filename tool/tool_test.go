@@ -1,8 +1,11 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,12 +64,37 @@ func TestReadPastTheEndSaysHowLongTheFileIs(t *testing.T) {
 	}
 }
 
-func TestReadRefusesDirectoriesAndSummarisesBinaries(t *testing.T) {
+// A directory lists its entries, so read-only mode can find files without bash.
+func TestReadListsADirectory(t *testing.T) {
 	e := env(t)
-	if _, err := (Read{e}).Run(context.Background(), args(t, map[string]any{"path": "."})); err == nil ||
-		!strings.Contains(err.Error(), "not a regular file") {
-		t.Fatalf("directory: %v", err)
+	for _, d := range []string{"sub", "zdir"} {
+		if err := os.Mkdir(filepath.Join(e.Root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
+	write(t, filepath.Join(e.Root, "b.txt"), "x")
+	write(t, filepath.Join(e.Root, "a.txt"), "x")
+	if err := os.Symlink("a.txt", filepath.Join(e.Root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Read{e}.Run(context.Background(), args(t, map[string]any{"path": "."}))
+	want := "     1\ta.txt\n     2\tb.txt\n     3\tlink@\n     4\tsub/\n     5\tzdir/\n"
+	if err != nil || res.Output != want || res.Summary != "5 entries" {
+		t.Fatalf("got %q %q %v", res.Output, res.Summary, err)
+	}
+	res, err = Read{e}.Run(context.Background(), args(t, map[string]any{"path": ".", "offset": 2, "limit": 2}))
+	want = "     2\tb.txt\n     3\tlink@\n... 2 entries not shown; continue with offset 4\n"
+	if err != nil || res.Output != want {
+		t.Fatalf("window: %q %v", res.Output, err)
+	}
+	res, err = Read{e}.Run(context.Background(), args(t, map[string]any{"path": "sub", "offset": 3}))
+	if err != nil || res.Output != "sub has 0 entries; none at offset 3" {
+		t.Fatalf("past the end: %q %v", res.Output, err)
+	}
+}
+
+func TestReadSummarisesBinaries(t *testing.T) {
+	e := env(t)
 	write(t, filepath.Join(e.Root, "b.bin"), "ab\x00cd")
 	res, err := Read{e}.Run(context.Background(), args(t, map[string]any{"path": "b.bin"}))
 	if err != nil || res.Output != "b.bin is binary, 5 bytes" {
@@ -379,7 +407,7 @@ func TestReadAndEditRefuseAFIFOWithoutBlocking(t *testing.T) {
 	for range 2 {
 		select {
 		case err := <-done:
-			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			if err == nil || !strings.Contains(err.Error(), "is not a regular file") {
 				t.Errorf("got %v", err)
 			}
 		case <-time.After(5 * time.Second):
@@ -592,5 +620,128 @@ func TestBashHidesVariables(t *testing.T) {
 	}
 	if want := "unset kept " + e.Root; strings.TrimSpace(res.Output) != want {
 		t.Fatalf("got %q, want %q", res.Output, want)
+	}
+}
+
+// With Seen set, edit and write change only a file the model read, as it is now.
+func TestEditAndWriteNeedACurrentRead(t *testing.T) {
+	e := env(t)
+	e.Seen = &Seen{}
+	f := filepath.Join(e.Root, "f.txt")
+	write(t, f, "a\nb\n")
+	run := func(tl Tool, v any) error {
+		_, err := tl.Run(context.Background(), args(t, v))
+		return err
+	}
+	editB := map[string]any{"path": "f.txt", "old_string": "b", "new_string": "c"}
+	if err := run(Edit{e}, editB); err == nil || !strings.Contains(err.Error(), "read f.txt before editing it") {
+		t.Fatalf("unread edit: %v", err)
+	}
+	if err := run(Write{e}, map[string]any{"path": "f.txt", "content": "x"}); err == nil || !strings.Contains(err.Error(), "before replacing it") {
+		t.Fatalf("unread write: %v", err)
+	}
+	if err := run(Write{e}, map[string]any{"path": "new.txt", "content": "x"}); err != nil {
+		t.Fatalf("a new file needs no read: %v", err)
+	}
+	if err := run(Read{e}, map[string]any{"path": "f.txt", "limit": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(Edit{e}, editB); err != nil {
+		t.Fatalf("edit after read: %v", err)
+	}
+	// Its own edit leaves the file known, so a second edit needs no read.
+	if err := run(Edit{e}, map[string]any{"path": "f.txt", "old_string": "c", "new_string": "d"}); err != nil {
+		t.Fatalf("second edit: %v", err)
+	}
+	// A change from outside, such as a formatter run through bash.
+	write(t, f, "a\nd\nmore\n")
+	if err := run(Edit{e}, map[string]any{"path": "f.txt", "old_string": "d", "new_string": "e"}); err == nil || !strings.Contains(err.Error(), "changed since it was last read") {
+		t.Fatalf("stale edit: %v", err)
+	}
+	// A file read through a symlink is known by its target.
+	if err := os.Symlink("f.txt", filepath.Join(e.Root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(Read{e}, map[string]any{"path": "link"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(Edit{e}, map[string]any{"path": "f.txt", "old_string": "more", "new_string": "less"}); err != nil {
+		t.Fatalf("edit after reading through a link: %v", err)
+	}
+	e.Seen.Reset()
+	if err := run(Edit{e}, map[string]any{"path": "f.txt", "old_string": "less", "new_string": "x"}); err == nil {
+		t.Fatal("an edit after Reset needed no read")
+	}
+}
+
+func TestReadReturnsAnImage(t *testing.T) {
+	e := env(t)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 3, 2))); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(e.Root, "a.png"), buf.String())
+	res, err := Read{e}.Run(context.Background(), args(t, map[string]any{"path": "a.png"}))
+	if err != nil || len(res.Images) != 1 || res.Images[0].MediaType != "image/png" || !bytes.Equal(res.Images[0].Data, buf.Bytes()) {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if !strings.Contains(res.Output, "PNG image, 3x2") || res.Summary != "image 3x2" {
+		t.Fatalf("output %q summary %q", res.Output, res.Summary)
+	}
+	// Over the limit, the model gets a line and no image.
+	big := filepath.Join(e.Root, "big.png")
+	write(t, big, buf.String())
+	if err := os.Truncate(big, ImageMax+1); err != nil {
+		t.Fatal(err)
+	}
+	res, err = Read{e}.Run(context.Background(), args(t, map[string]any{"path": "big.png"}))
+	if err != nil || len(res.Images) != 0 || !strings.Contains(res.Output, "over the 3 MiB") {
+		t.Fatalf("large: %+v %v", res.Output, err)
+	}
+}
+
+// edit and apply_patch hold a file twice in memory, so a huge one is refused before it is read.
+func TestEditRefusesAHugeFile(t *testing.T) {
+	e := env(t)
+	f := filepath.Join(e.Root, "huge.txt")
+	write(t, f, "a\n")
+	if err := os.Truncate(f, EditMax+1); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Edit{e}.Run(context.Background(), args(t, map[string]any{"path": "huge.txt", "old_string": "a", "new_string": "b"}))
+	if err == nil || !strings.Contains(err.Error(), "over the 16 MiB") {
+		t.Fatalf("edit: %v", err)
+	}
+	_, err = Patch{e}.Run(context.Background(), args(t, patch("*** Update File: huge.txt", "-a", "+b")))
+	if err == nil || !strings.Contains(err.Error(), "over the 16 MiB") {
+		t.Fatalf("apply_patch: %v", err)
+	}
+}
+
+// An embedding app's tiny cap is raised, since bash's capture panicked under 1 KiB.
+func TestASmallOutputCapIsRaised(t *testing.T) {
+	e := env(t)
+	e.Limits.OutputCap = 100
+	res, err := Bash{e}.Run(context.Background(), args(t, map[string]any{"command": "echo hi"}))
+	if err != nil || !strings.Contains(res.Output, "hi") {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+func TestExitedJobsAreForgotten(t *testing.T) {
+	e := env(t)
+	if _, err := (Bash{e}).Run(context.Background(), args(t, map[string]any{"command": "sleep 0.3 >/dev/null 2>&1 &"})); err != nil {
+		t.Fatal(err)
+	}
+	e.Jobs.mu.Lock()
+	n := len(e.Jobs.pgids)
+	e.Jobs.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d jobs recorded", n)
+	}
+	time.Sleep(time.Second)
+	e.Jobs.prune()
+	if len(e.Jobs.pgids) != 0 {
+		t.Fatalf("an exited group was kept: %v", e.Jobs.pgids)
 	}
 }

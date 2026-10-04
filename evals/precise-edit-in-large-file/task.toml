@@ -1,0 +1,2 @@
+prompt = "In gen/funcs.go, change F317 so that it returns twice its argument. Change nothing else."
+check = "go test ./..."

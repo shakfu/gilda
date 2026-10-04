@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Every SDK retries a failed request by sending it again with the same context, and says
@@ -42,8 +43,20 @@ func Transport(base http.RoundTripper) http.RoundTripper {
 }
 
 // HTTPClient is a client with no overall timeout, since a stream is legitimately long, whose
-// requests report their retries.
-var HTTPClient = &http.Client{Transport: Transport(nil)}
+// requests report their retries. It waits HeaderTimeout for a response to start.
+var HTTPClient = &http.Client{Transport: Transport(WaitingTransport(HeaderTimeout))}
+
+// HeaderTimeout bounds the wait for a response's headers. A streamed response sends them as it
+// starts, so this ends only a request the server accepted and never answered. It is long
+// because a local server may process a long prompt before it answers.
+const HeaderTimeout = 10 * time.Minute
+
+// WaitingTransport is http.DefaultTransport waiting at most wait for response headers.
+func WaitingTransport(wait time.Duration) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = wait
+	return t
+}
 
 type retryTransport struct{ base http.RoundTripper }
 

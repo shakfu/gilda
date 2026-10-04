@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -185,5 +186,63 @@ func TestRefusalsAndFilteredResponsesStopAsRefusals(t *testing.T) {
 		if err != nil || resp.Stop != llm.StopRefusal || resp.Message.Text != c.text || streamed.String() != c.text {
 			t.Errorf("%s: stop %q text %q streamed %q err %v", name, resp.Stop, resp.Message.Text, streamed.String(), err)
 		}
+	}
+}
+
+// A saved and restored payload replays the same request as the one kept in memory.
+func TestNativePayloadSurvivesSaving(t *testing.T) {
+	srv := llmtest.New(t, turn, answer, answer)
+	p := New("openrouter", "k", srv.URL)
+	user := llm.Message{Role: llm.User, Text: "hi"}
+	resp, err := p.Stream(context.Background(), request("anthropic/claude-x", user), func(llm.Event) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := llm.Message{Role: llm.Tool, Results: []llm.ToolResult{{CallID: "call_1", Content: "x"}}}
+	for _, m := range []llm.Message{resp.Message, llmtest.Restore(t, Codec, resp.Message)} {
+		h := []llm.Message{user, m, results}
+		if _, err := p.Stream(context.Background(), request("anthropic/claude-x", h...), func(llm.Event) {}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(srv.Bodies[1], srv.Bodies[2]) {
+		t.Fatalf("in memory:\n%v\nrestored:\n%v", srv.Bodies[1], srv.Bodies[2])
+	}
+	if _, err := Codec.Encode("not a payload"); err == nil {
+		t.Fatal("a foreign payload was encoded")
+	}
+	for _, bad := range []string{`"x"`, `{}`, `[{}]`} {
+		if _, err := Codec.Decode(json.RawMessage(bad)); err == nil {
+			t.Errorf("decoded %s", bad)
+		}
+	}
+}
+
+// Chat Completions takes images only from the user, so they follow the tool messages.
+func TestToolResultImagesAreSent(t *testing.T) {
+	srv := llmtest.New(t, answer)
+	if _, err := New("openrouter", "k", srv.URL).Stream(context.Background(), request("m", llmtest.ImageHistory("call_1")...), func(llm.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	msgs := llmtest.Get(srv.Bodies[0], "messages")
+	if llmtest.Get(msgs, 3, "role") != "tool" || llmtest.Get(msgs, 3, "content") != "a.png is a PNG image" ||
+		llmtest.Get(msgs, 4, "role") != "user" || llmtest.Get(msgs, 4, "content", 0, "text") != llm.ImagesIntro ||
+		llmtest.Get(msgs, 4, "content", 1, "image_url", "url") != llmtest.PNGDataURL {
+		t.Fatalf("messages %v", msgs)
+	}
+}
+
+// A payload this adapter did not make, under its name and model, is rebuilt from text and
+// calls rather than asserted.
+func TestAForeignPayloadIsRebuilt(t *testing.T) {
+	srv := llmtest.New(t, answer)
+	h := llmtest.ImageHistory("call_1")
+	h[1].Text = "looking"
+	h[1].Native = &llm.Native{Provider: "openrouter", Model: "m", Data: "not a payload"}
+	if _, err := New("openrouter", "k", srv.URL).Stream(context.Background(), request("m", h...), func(llm.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if body, _ := json.Marshal(srv.Bodies[0]); !strings.Contains(string(body), `"looking"`) {
+		t.Fatalf("the message was not rebuilt: %s", body)
 	}
 }

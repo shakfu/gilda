@@ -9,6 +9,8 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 )
 
@@ -33,7 +35,28 @@ type ToolResult struct {
 	CallID  string `json:"call_id"`
 	Content string `json:"content"`
 	IsError bool   `json:"is_error,omitempty"`
+	// Images follow Content, for a model that accepts images; see Request.
+	Images []Image `json:"images,omitempty"`
 }
+
+// ImagesIntro introduces the user message that carries tool results' images for an API that
+// takes images only from the user.
+const ImagesIntro = "Images returned by the tool calls above, in order:"
+
+// Image is a picture a tool returned.
+type Image struct {
+	// MediaType is image/png, image/jpeg, image/gif or image/webp.
+	MediaType string `json:"media_type"`
+	Data      []byte `json:"data"`
+}
+
+// DataURL encodes the image as a data: URL, as chat APIs take it.
+func (i Image) DataURL() string {
+	return "data:" + i.MediaType + ";base64," + base64.StdEncoding.EncodeToString(i.Data)
+}
+
+// Base64 encodes the image's data.
+func (i Image) Base64() string { return base64.StdEncoding.EncodeToString(i.Data) }
 
 type Message struct {
 	Role    Role         `json:"role"`
@@ -48,6 +71,13 @@ type Native struct {
 	Provider string
 	Model    string
 	Data     any
+}
+
+// NativeCodec saves and restores the Native payloads of one adapter, so a resumed session
+// replays its reasoning.
+type NativeCodec interface {
+	Encode(data any) (json.RawMessage, error)
+	Decode(raw json.RawMessage) (any, error)
 }
 
 // NativeFor returns the payload when it was produced by this provider and model.
@@ -88,6 +118,8 @@ func (t ToolSpec) Required() []string {
 	return nil
 }
 
+// Request is one round-trip. Tool results carry images only when the model accepts them; the
+// agent strips them otherwise.
 type Request struct {
 	Model    string
 	System   string

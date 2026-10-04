@@ -73,6 +73,7 @@ func TestSettings(t *testing.T) {
 		"[permissions]\ncommands = [\"a | b\"]\n":      "bad command",
 		"[permissions]\nhosts = [\"https://x.com\"]\n": "bad host",
 		"[agent]\nmax_tokens = 0\n":                    "agent.max_tokens must be at least 1",
+		"[repl]\nnotify = \"loud\"\n":                  "repl.notify must be bell, osc9 or off",
 		"[agent]\nstream_retries = -1\n":               "agent.stream_retries must be at least 0",
 		"[tools]\noutput_cap = 100\n":                  "tools.output_cap must be at least 4096",
 		"[prompt]\nskill = false\n":                    "unknown keys: prompt.skill",

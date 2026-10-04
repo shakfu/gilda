@@ -1,0 +1,2 @@
+prompt = "The program in cmd/greet prints 'Hello, NAME'. Add a --shout flag that prints the greeting in upper case followed by '!'. Without the flag, the output must not change."
+check = 'test "$(go run ./cmd/greet bob)" = "Hello, bob" && test "$(go run ./cmd/greet --shout bob)" = "HELLO, BOB!"'

@@ -208,6 +208,11 @@ func RetryLine(r agent.Retry) string {
 	return line
 }
 
+// ElidedLine reports old tool results replaced by stubs to free context.
+func ElidedLine(e agent.Elided) string {
+	return fmt.Sprintf("[context] elided %d old tool results (%d KiB) to free context", e.Results, (e.Bytes+1023)/1024)
+}
+
 // UsageLine summarises a prompt: context used, tokens in and out, cost.
 func UsageLine(a *app.App, u llm.Usage) string {
 	return usageLine(a.Agent.Used, a.Agent.Context, u, a.Agent.Usage)

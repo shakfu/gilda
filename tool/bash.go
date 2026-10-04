@@ -60,6 +60,7 @@ func (b Bash) Run(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if loginShell.MatchString(a.Command) {
 		return Result{}, fmt.Errorf("command already runs under bash -c; pass the inner command without a login shell")
 	}
+	b.Jobs.prune()
 	l := b.limits()
 	timeout := l.BashTimeout
 	if a.Timeout > 0 {
@@ -226,6 +227,17 @@ func (j *Jobs) add(pgid int) {
 	j.mu.Lock()
 	j.pgids = append(j.pgids, pgid)
 	j.mu.Unlock()
+}
+
+// prune forgets groups that have exited, so Kill never signals a group id the system has since
+// given to unrelated processes. A group that exits between prune and Kill can still be reused.
+func (j *Jobs) prune() {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.pgids = slices.DeleteFunc(j.pgids, func(pgid int) bool { return syscall.Kill(-pgid, 0) != nil })
 }
 
 // Kill stops every recorded process group.

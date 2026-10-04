@@ -97,3 +97,27 @@ func TestRefusalsAndFilteredResponsesStopAsRefusals(t *testing.T) {
 		}
 	}
 }
+
+// Chat Completions takes images only from the user, so they follow the tool messages.
+func TestToolResultImagesAreSent(t *testing.T) {
+	srv := llmtest.New(t, turn)
+	req := llm.Request{Model: "local", MaxTokens: 10, Messages: llmtest.ImageHistory("call_a")}
+	if _, err := New("llamacpp", "", srv.URL).Stream(context.Background(), req, func(llm.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	msgs := llmtest.Get(srv.Bodies[0], "messages")
+	if llmtest.Get(msgs, 2, "role") != "tool" || llmtest.Get(msgs, 3, "role") != "user" ||
+		llmtest.Get(msgs, 3, "content", 0, "text") != llm.ImagesIntro || llmtest.Get(msgs, 3, "content", 1, "image_url", "url") != llmtest.PNGDataURL {
+		t.Fatalf("messages %v", msgs)
+	}
+	// A result without images adds no user message.
+	srv = llmtest.New(t, turn)
+	h := llmtest.ImageHistory("call_a")
+	h[2].Results[0].Images = nil
+	if _, err := New("llamacpp", "", srv.URL).Stream(context.Background(), llm.Request{Model: "local", Messages: h}, func(llm.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(llmtest.Get(srv.Bodies[0], "messages").([]any)); n != 3 {
+		t.Fatalf("%d messages", n)
+	}
+}

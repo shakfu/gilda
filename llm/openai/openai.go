@@ -113,12 +113,15 @@ func (p *Provider) input(req llm.Request) (responses.ResponseInputParam, error) 
 			out = append(out, responses.ResponseInputItemParamOfMessage(m.Text, responses.EasyInputMessageRoleUser))
 		case llm.Tool:
 			for _, r := range m.Results {
-				out = append(out, responses.ResponseInputItemParamOfFunctionCallOutput(r.CallID, r.Content))
+				out = append(out, functionOutput(r))
 			}
 		case llm.Assistant:
+			// A payload of another type, from an adapter sharing this name, is rebuilt instead.
 			if native, ok := m.NativeFor(p.name, req.Model); ok {
-				out = append(out, native.(responses.ResponseInputParam)...)
-				continue
+				if items, ok := native.(responses.ResponseInputParam); ok {
+					out = append(out, items...)
+					continue
+				}
 			}
 			if m.Text != "" {
 				out = append(out, responses.ResponseInputItemParamOfMessage(m.Text, responses.EasyInputMessageRoleAssistant))
@@ -129,6 +132,20 @@ func (p *Provider) input(req llm.Request) (responses.ResponseInputParam, error) 
 		}
 	}
 	return out, nil
+}
+
+// functionOutput is the result's text, followed by its images when it has any.
+func functionOutput(r llm.ToolResult) responses.ResponseInputItemUnionParam {
+	if len(r.Images) == 0 {
+		return responses.ResponseInputItemParamOfFunctionCallOutput(r.CallID, r.Content)
+	}
+	items := responses.ResponseFunctionCallOutputItemListParam{{OfInputText: &responses.ResponseInputTextContentParam{Text: r.Content}}}
+	for _, img := range r.Images {
+		items = append(items, responses.ResponseFunctionCallOutputItemUnionParam{
+			OfInputImage: &responses.ResponseInputImageContentParam{ImageURL: sdk.String(img.DataURL())},
+		})
+	}
+	return responses.ResponseInputItemParamOfFunctionCallOutput(r.CallID, items)
 }
 
 func (p *Provider) response(model string, r *responses.Response) (llm.Response, error) {
@@ -213,4 +230,38 @@ func wrap(err error) error {
 		return errors.Join(llm.ErrContext, err)
 	}
 	return err
+}
+
+// Codec saves and restores the input items this adapter keeps in Native.
+var Codec llm.NativeCodec = codec{}
+
+type codec struct{}
+
+func (codec) Encode(data any) (json.RawMessage, error) {
+	v, ok := data.(responses.ResponseInputParam)
+	if !ok {
+		return nil, fmt.Errorf("openai: native payload is %T", data)
+	}
+	return json.Marshal(v)
+}
+
+// Decode refuses anything but a list of typed items: the SDK's decoder accepts other JSON
+// without error and yields empty items, which the API would reject.
+func (codec) Decode(raw json.RawMessage) (any, error) {
+	var items []struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, err
+	}
+	for _, it := range items {
+		if it.Type == "" {
+			return nil, errors.New("openai: native payload has an untyped item")
+		}
+	}
+	var v responses.ResponseInputParam
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }

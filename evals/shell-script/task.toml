@@ -1,0 +1,2 @@
+prompt = "Write count.sh, a bash script that prints the number of files ending in .txt under the directory given as its first argument, searching subdirectories too. It prints only the number."
+check = 'mkdir -p t/a/b && touch t/1.txt t/a/2.txt t/a/b/3.txt t/a/b/x.md && test "$(bash count.sh t | tr -d " ")" = 3'

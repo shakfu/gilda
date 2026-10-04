@@ -1,0 +1,2 @@
+prompt = "The tests in this module fail. Find the bug and fix it. Do not change the tests."
+check = "go test ./..."

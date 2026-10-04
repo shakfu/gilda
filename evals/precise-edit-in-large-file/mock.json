@@ -1,0 +1,41 @@
+[
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "gen/funcs.go",
+     "offset": 950,
+     "limit": 4
+    }
+   }
+  ]
+ },
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "calls": [
+   {
+    "name": "edit",
+    "arguments": {
+     "path": "gen/funcs.go",
+     "old_string": "func F317(x int) int { return x }",
+     "new_string": "func F317(x int) int { return 2 * x }"
+    }
+   }
+  ]
+ },
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "text": "F317 doubles now."
+ }
+]

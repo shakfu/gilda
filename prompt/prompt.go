@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 const base = `You are gilda, a coding agent. Use the tools to inspect and change files. Be terse. State what you did; do not narrate what you are about to do.`
@@ -30,8 +31,14 @@ const maxFrontmatter = 4096
 // Options leave parts out of the prompt. Both are sent with every request.
 type Options struct {
 	NoAgents bool // AGENTS.md files
-	NoSkills bool // skills' frontmatter
+	NoSkills bool // skills' frontmatter, the user's and the repository's
+	// Today is the date the prompt states, as 2006-01-02; empty means the current one.
+	Today string
 }
+
+// ProjectSkills is where a repository keeps its skills, relative to its root: next to
+// AGENTS.md, under the same agent-neutral name.
+const ProjectSkills = ".agents/skills"
 
 // Build returns the system prompt for a session rooted at dir. configDir holds the user's own
 // AGENTS.md and skills/; it may be empty.
@@ -43,6 +50,14 @@ func Build(dir, configDir string, o Options) string {
 	fmt.Fprintf(&b, "- Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	// The shell the bash tool runs, not $SHELL: the model writes syntax for this one.
 	b.WriteString("- Command shell: bash\n")
+	today := o.Today
+	if today == "" {
+		today = time.Now().Format("2006-01-02")
+	}
+	fmt.Fprintf(&b, "- Date at session start: %s\n", today)
+	if branch := Branch(dir); branch != "" {
+		fmt.Fprintf(&b, "- Git branch at session start: %s\n", branch)
+	}
 
 	if !o.NoAgents {
 		for _, path := range AgentsFiles(dir, configDir) {
@@ -52,8 +67,13 @@ func Build(dir, configDir string, o Options) string {
 		}
 	}
 
-	if configDir != "" && !o.NoSkills {
-		if skills := Skills(filepath.Join(configDir, "skills")); len(skills) > 0 {
+	if !o.NoSkills {
+		var skills []Skill
+		if configDir != "" {
+			skills = Skills(filepath.Join(configDir, "skills"))
+		}
+		skills = append(skills, Skills(ProjectSkillsDir(dir))...)
+		if len(skills) > 0 {
 			fmt.Fprintf(&b, "\n# Skills\n\n%s\n", skillsIntro)
 			for _, s := range skills {
 				fmt.Fprintf(&b, "\n## %s\n\n%s\n", s.Path, s.Frontmatter)
@@ -89,6 +109,41 @@ func AgentsFiles(dir, configDir string) []string {
 		}
 	}
 	return out
+}
+
+// ProjectSkillsDir is the repository's skills directory for dir: under the repository root, or
+// under dir outside a repository.
+func ProjectSkillsDir(dir string) string {
+	root := RepoRoot(dir)
+	if root == "" {
+		root = dir
+	}
+	return filepath.Join(root, ProjectSkills)
+}
+
+// Branch names the branch checked out in dir's repository, "detached at" and a short commit
+// when none is, or "" outside a repository. It reads .git/HEAD rather than running git.
+func Branch(dir string) string {
+	root := RepoRoot(dir)
+	if root == "" {
+		return ""
+	}
+	gitDir := filepath.Join(root, ".git")
+	// A worktree or submodule has a .git file naming its git directory.
+	if text := readTrimmed(gitDir); strings.HasPrefix(text, "gitdir: ") {
+		gitDir = strings.TrimPrefix(text, "gitdir: ")
+		if !filepath.IsAbs(gitDir) {
+			gitDir = filepath.Join(root, gitDir)
+		}
+	}
+	head := readTrimmed(filepath.Join(gitDir, "HEAD"))
+	if ref, ok := strings.CutPrefix(head, "ref: refs/heads/"); ok {
+		return ref
+	}
+	if len(head) >= 7 && !strings.ContainsAny(head, " \n") {
+		return "detached at " + head[:7]
+	}
+	return ""
 }
 
 // RepoRoot returns the nearest ancestor of dir holding .git, or "".

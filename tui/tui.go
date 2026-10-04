@@ -51,7 +51,11 @@ func Run(ctx context.Context, a *app.App, opts Options) error {
 		err = nil
 	}
 	if m.prompts > 0 {
-		fmt.Fprintln(Writer(os.Stdout, opts.Color), m.st.Dim.Render(m.sessionLine()))
+		w := Writer(os.Stdout, opts.Color)
+		fmt.Fprintln(w, m.st.Dim.Render(m.sessionLine()))
+		if a.SessionSaved() {
+			fmt.Fprintln(w, m.st.Dim.Render("resume with: gilda --resume "+a.Agent.SessionID))
+		}
 	}
 	return err
 }
@@ -61,6 +65,8 @@ type (
 	doneMsg  struct {
 		res agent.Result
 		err error
+		// saveErr is set when the session could not be saved.
+		saveErr error
 	}
 	prepMsg struct {
 		warns []error
@@ -283,12 +289,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for _, l := range ApprovalLines(m.st, msg.label, msg.preview, m.width) {
 				m.out(l)
 			}
+			return m, tea.Sequence(m.flush(), m.notify("waiting for approval"), listen(m.events))
 		}
 		return m, tea.Sequence(m.flush(), listen(m.events))
 
 	case doneMsg:
+		ping := m.notify("done")
 		m.finish(msg)
-		return m, tea.Sequence(m.flush(), m.next())
+		return m, tea.Sequence(m.flush(), ping, m.next())
 
 	case spinner.TickMsg:
 		if !m.running && m.busy == "" {
@@ -427,10 +435,30 @@ func (m *model) start(text string) tea.Cmd {
 	go func() {
 		defer m.tasks.done()
 		res, err := ag.Run(ctx, text, func(e agent.Event) { send(eventMsg{e}) })
-		send(doneMsg{res, err})
+		// Saved here, while this goroutine still owns the agent.
+		send(doneMsg{res, err, m.app.Save()})
 		close(ch)
 	}()
 	return tea.Batch(listen(ch), m.spin.Tick)
+}
+
+// notifyAfter is how long a turn runs before its end or an approval it waits on gets attention.
+// A user watching a shorter turn needs none.
+var notifyAfter = 30 * time.Second
+
+// notify rings the bell or sends a desktop notification, as settings.toml says, when the turn
+// has run for notifyAfter.
+func (m *model) notify(what string) tea.Cmd {
+	if !m.running || time.Since(m.started) < notifyAfter {
+		return nil
+	}
+	switch m.app.Notify() {
+	case "bell":
+		return tea.Raw("\a")
+	case "osc9":
+		return tea.Raw("\x1b]9;gilda: " + what + "\a")
+	}
+	return nil
 }
 
 // eventBuffer is how many events a run may send ahead of the UI.
@@ -578,6 +606,10 @@ func (m *model) event(ev agent.Event) {
 		m.endText()
 		m.phase = fmt.Sprintf("retry %d: %s", e.Attempt, oneLine(e.Reason))
 		m.out(m.st.Warn.Render(RetryLine(e)))
+	case agent.Elided:
+		m.out(m.st.Dim.Render(ElidedLine(e)))
+	case agent.TaskDone:
+		m.session.Add(e.Usage)
 	case agent.ToolStart:
 		m.endText()
 		m.phase = "preparing " + e.Name
@@ -632,6 +664,9 @@ func (m *model) finish(d doneMsg) {
 	if d.res.Turns > 0 {
 		m.out(m.st.Dim.Render(usageLine(m.used, m.window, d.res.Usage, m.session)))
 	}
+	if d.saveErr != nil {
+		m.out(m.st.Warn.Render("warning: session: " + d.saveErr.Error()))
+	}
 }
 
 func (m *model) banner(warns []error) {
@@ -640,12 +675,40 @@ func (m *model) banner(warns []error) {
 	for _, p := range prompt.AgentsFiles(m.app.Root(), m.app.ConfigDir()) {
 		m.out(m.st.Dim.Render("  instructions: " + shortPath(p)))
 	}
+	if n := len(prompt.Skills(prompt.ProjectSkillsDir(m.app.Root()))); n > 0 {
+		m.out(m.st.Dim.Render(fmt.Sprintf("  project skills: %d in %s", n, shortPath(prompt.ProjectSkillsDir(m.app.Root())))))
+	}
 	if m.app.Distrusted() {
 		m.out(m.st.Dim.Render("  " + distrustNote))
 	}
+	m.resumedLines()
 	for _, w := range warns {
 		m.out(m.st.Warn.Render("warning: " + w.Error()))
 	}
+}
+
+// resumedLines describes a conversation loaded from a saved session, if there is one.
+func (m *model) resumedLines() {
+	if h := m.app.Agent.History; len(h) > 0 {
+		m.used = m.app.Agent.Used
+		m.out(m.st.Dim.Render(fmt.Sprintf("  resumed %s: %d messages", m.app.Agent.SessionID, len(h))))
+		if last := lastText(h, llm.User); last != "" {
+			m.out(m.st.Dim.Render("  last prompt: " + ansi.Truncate(oneLine(last), max(m.width-16, 20), "...")))
+		}
+		if last := lastText(h, llm.Assistant); last != "" {
+			m.out(m.st.Dim.Render("  last answer: " + ansi.Truncate(oneLine(last), max(m.width-16, 20), "...")))
+		}
+	}
+}
+
+// lastText returns the text of the last message with the given role.
+func lastText(h []llm.Message, role llm.Role) string {
+	for i := len(h) - 1; i >= 0; i-- {
+		if h[i].Role == role && strings.TrimSpace(h[i].Text) != "" {
+			return h[i].Text
+		}
+	}
+	return ""
 }
 
 func (m *model) windowNote() string {
