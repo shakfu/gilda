@@ -47,10 +47,36 @@ Two gilda bugs surfaced during the runs; each is in `CHANGELOG.md`.
 - Malformed tool arguments were replayed verbatim, and llama-server failed every later request with HTTP 500. Fixed before the LFM2.5, C3SM-9B, Qwen3-Coder and gemma-4 Q5_K_M runs. The Qwen3-4B and gemma-4 Q4_K_M runs predate the fix; neither emitted malformed arguments.
 - openai-go before v3.51.0 failed on llama-server's keep-alive comment. Only Qwen3-Coder, whose prompt processing is slow with experts on the CPU, triggered it: 3/3 on `precise-edit-in-large-file`. Its `precise-edit-in-large-file` result is a rerun on the fixed build. The gemma-4 Q5_K_M run had both fixes.
 
+## Failure kinds
+
+Each of the 46 failed runs, classified by the last 2 KB of its check output. The classification matches text, so it is approximate; two runs with empty output count as D3.
+
+| Model | Failed | A | B | C | D1 | D2 | D3 | E |
+|-|-|-|-|-|-|-|-|-|
+| Qwen3-Coder | 1/24 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
+| gemma-4 Q5_K_M | 3/24 | 1 | 1 | 0 | 0 | 1 | 0 | 0 |
+| C3SM-9B | 8/24 | 0 | 0 | 3 | 1 | 2 | 2 | 0 |
+| LFM2.5 | 9/24 | 4 | 1 | 0 | 0 | 2 | 2 | 0 |
+| Qwen3-4B | 16/24 | 6 | 0 | 1 | 0 | 5 | 1 | 3 |
+| gemma-4 Q4_K_M | 9/24 | 6 | 0 | 0 | 0 | 2 | 1 | 0 |
+| All | 46 | 18 | 2 | 4 | 1 | 12 | 6 | 3 |
+
+| Kind | Meaning | Caught by |
+|-|-|-|
+| A | Does not compile | `go build ./...` |
+| B | Old name left in a comment | a task-specific grep |
+| C | Name the prompt asked for is missing | rereading the prompt |
+| D1 | Visible test fails | `go test`; only `fix-off-by-one` has visible tests |
+| D2 | Hidden test fails | tests of the intended behaviour |
+| D3 | Builds, but wrong output when run | running the program as the prompt describes |
+| E | Wrong answer to a question | nothing |
+
+A generic build-and-test step can catch at most A and D1: 19 of 46 failures. Running the program adds D3, for 25. The bound assumes every caught error is then fixed; LFM2.5 made no edit after either of its 2 failing checks.
+
 ## Observations
 
 - Qwen3-Coder passes 23/24, so the suite cannot show a gilda change that helps it. Harder tasks are needed for that, such as one long enough to need elision.
-- Weaker models rarely check their work. The gemma-4 Q4_K_M and Qwen3-4B `add-flag` failures left code that does not compile or prints the wrong output; one `go build` would have caught each. The base prompt (`prompt/prompt.go`) does not ask for verification. An A/B with an appended instruction would test whether that matters.
+- Weaker models rarely check their work. The gemma-4 Q4_K_M and Qwen3-4B `add-flag` failures left code that does not compile or prints the wrong output; one `go build` or one run of the program would have caught each. The base prompt (`prompt/prompt.go`) does not ask for verification. An A/B with an appended instruction would test whether that matters.
 - Qwen3-4B overflowed the 32k window on `precise-edit-in-large-file`. llama-server answered `400 ... exceeds the available context size`. The `anthropic`, `openai` and `openrouter` adapters map their providers' overflow errors to `llm.ErrContext`; `compat` maps none, so this one is not reported as context overflow.
-- Quantization may matter. gemma-4 Q4_K_M (5.3 GB, 3.6 GB VRAM) passed 15/24 and Q5_K_M (5.5 GB, 4.1 GB VRAM) 21/24. Q5_K_M matched or beat Q4_K_M on every task, but a two-sided Fisher exact test gives p = 0.09, and Q4_K_M ran before both fixes. Q4_K_M was removed in favour of Q5_K_M.
+- Quantization may matter. gemma-4 Q4_K_M (5.3 GB, 3.6 GB VRAM) passed 15/24 and Q5_K_M (5.5 GB, 4.1 GB VRAM) 21/24. Q5_K_M matched or beat Q4_K_M on every task, and Q4_K_M's extra failures are mostly kind A (6 against 1). But a two-sided Fisher exact test gives p = 0.09, and Q4_K_M ran before both fixes. Q4_K_M was removed in favour of Q5_K_M.
 - The C3SM-9B merge was removed after the run. It has no published evaluation, so its row is not reproducible.
