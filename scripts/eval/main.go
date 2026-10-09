@@ -67,6 +67,8 @@ type outcome struct {
 	Seconds  float64 `json:"seconds"`
 	Model    string  `json:"model"`
 	CheckOut string  `json:"check_output,omitempty"`
+	// recorded is set when gilda wrote a result record, so the outcome is its own.
+	recorded bool
 }
 
 func main() {
@@ -134,6 +136,11 @@ func runAll(ctx context.Context, tasks []task, o options, progress io.Writer) ([
 			if err != nil {
 				return results, fmt.Errorf("%s run %d: %w", t.Name, i, err)
 			}
+			// An error before the first turn, such as an unknown model or a missing key, would
+			// repeat in every run.
+			if len(results) == 0 && r.recorded && r.Outcome == "error" && r.Turns == 0 {
+				return results, fmt.Errorf("%s run %d failed before its first turn: %s", t.Name, i, r.Error)
+			}
 			mark := "FAIL"
 			if r.Pass {
 				mark = "pass"
@@ -197,7 +204,11 @@ func runOnce(ctx context.Context, t task, i int, o options) (outcome, error) {
 		return r, err
 	}
 	text := r.read(stdout.String())
-	if r.Outcome == "" {
+	switch {
+	case r.recorded:
+	case errors.Is(rctx.Err(), context.DeadlineExceeded):
+		r.Outcome, r.Error = "timeout", fmt.Sprintf("killed after %s", o.timeout)
+	default:
 		r.Outcome, r.Error = "error", fmt.Sprintf("no result record: %v", runErr)
 	}
 
@@ -221,9 +232,11 @@ func runOnce(ctx context.Context, t task, i int, o options) (outcome, error) {
 	return r, nil
 }
 
-// read fills r from the run's result record and returns its final text.
+// read fills r from the run's result record and returns its final text. A run killed before
+// its result record is counted from its turn and task records; a subagent killed mid-run is lost.
 func (r *outcome) read(jsonl string) string {
 	var text string
+	var partial outcome
 	sc := bufio.NewScanner(strings.NewReader(jsonl))
 	sc.Buffer(make([]byte, 1<<20), 64<<20)
 	for sc.Scan() {
@@ -240,15 +253,31 @@ func (r *outcome) read(jsonl string) string {
 				Cost   *float64 `json:"cost"`
 			} `json:"usage"`
 		}
-		if json.Unmarshal(sc.Bytes(), &rec) != nil || rec.Type != "result" {
+		if json.Unmarshal(sc.Bytes(), &rec) != nil {
 			continue
 		}
-		r.Outcome, r.Error, r.Turns, r.Model = rec.Outcome, rec.Error, rec.Turns, rec.Model
-		r.Input, r.Output = rec.Usage.Input, rec.Usage.Output
+		var cost float64
 		if rec.Usage.Cost != nil {
-			r.Cost = *rec.Usage.Cost
+			cost = *rec.Usage.Cost
 		}
-		text = rec.Text
+		switch rec.Type {
+		case "start":
+			partial.Model = rec.Model
+		case "turn", "task":
+			if rec.Type == "turn" {
+				partial.Turns++
+			}
+			partial.Input += rec.Usage.Input
+			partial.Output += rec.Usage.Output
+			partial.Cost += cost
+		case "result":
+			r.Outcome, r.Error, r.Turns, r.Model = rec.Outcome, rec.Error, rec.Turns, rec.Model
+			r.Input, r.Output, r.Cost = rec.Usage.Input, rec.Usage.Output, cost
+			r.recorded, text = true, rec.Text
+		}
+	}
+	if !r.recorded {
+		r.Turns, r.Input, r.Output, r.Cost, r.Model = partial.Turns, partial.Input, partial.Output, partial.Cost, partial.Model
 	}
 	return text
 }

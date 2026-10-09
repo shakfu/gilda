@@ -19,3 +19,12 @@ func TestRequiredFromGoOrJSON(t *testing.T) {
 		t.Errorf("no required gave %v", r)
 	}
 }
+
+// A raw tab in a string, as LFM2.5 emitted, fails llama-server's parse of every later request.
+func TestArgsFallsBackToAnEmptyObject(t *testing.T) {
+	for in, want := range map[string]string{`{"a":1}`: `{"a":1}`, `{"a":`: `{}`, ``: `{}`, `[1]`: `{}`, "{\"a\":\"x\ty\"}": `{}`} {
+		if got := Args(in); got != want {
+			t.Errorf("Args(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

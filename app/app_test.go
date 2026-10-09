@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenRouterTeam/go-sdk/models/components"
 
@@ -97,6 +98,36 @@ func TestAFailedSwitchLeavesTheSessionAlone(t *testing.T) {
 	}
 	if a.ProviderID != "openrouter" || a.Agent.Model != "x/y" || a.Agent.Provider.Name() != "openrouter" {
 		t.Fatalf("state changed: %s %s", a.ProviderID, a.Agent.Model)
+	}
+}
+
+// A local session fetches no price list; switching to a cloud provider loads it.
+func TestPricesLoadOnlyForACloudProvider(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "k")
+	dir := t.TempDir()
+	cat := price.Catalog{Fetched: time.Now(), Models: map[string]price.Entry{}}
+	data, _ := json.Marshal(cat)
+	if err := os.WriteFile(filepath.Join(dir, "openrouter-models.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(Options{Provider: "llamacpp", Model: "m", CacheDir: dir, StateDir: dir, ConfigDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.models = map[string][]llm.Model{"llamacpp": {{ID: "m"}}, "anthropic": {{ID: "claude-x"}}}
+	if _, err := a.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if a.prices != nil {
+		t.Fatal("a local session loaded the price list")
+	}
+	if err := a.Switch(context.Background(), "anthropic", "claude-x"); err != nil {
+		t.Fatal(err)
+	}
+	if a.prices == nil || a.Agent.Prices != a.prices {
+		t.Fatal("switching to a cloud provider did not load the price list")
 	}
 }
 

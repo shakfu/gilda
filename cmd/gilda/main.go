@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -23,7 +24,14 @@ import (
 	"github.com/shakfu/gilda/tui"
 )
 
-var version = "0.1.0"
+// version is set by the Makefile's -ldflags; otherwise it comes from the module or VCS build info.
+var version = ""
+
+func init() {
+	if info, ok := debug.ReadBuildInfo(); ok && version == "" {
+		version = info.Main.Version
+	}
+}
 
 type flags struct {
 	app.Options

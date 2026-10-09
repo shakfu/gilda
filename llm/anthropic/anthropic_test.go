@@ -150,14 +150,6 @@ func TestAStreamWithoutAStopReasonIsAnError(t *testing.T) {
 	}
 }
 
-func TestRawArgsFallsBackToAnEmptyObject(t *testing.T) {
-	for in, want := range map[string]string{`{"a":1}`: `{"a":1}`, `{"a":`: `{}`, ``: `{}`, `[1]`: `{}`} {
-		if got := string(rawArgs(in)); got != want {
-			t.Errorf("rawArgs(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // Some OpenRouter upstreams issue ids such as "functions.bash:0", which Anthropic rejects.
 func TestForeignCallIDsAreMadeValidOnBothSides(t *testing.T) {
 	srv := llmtest.New(t, plainAnswer)

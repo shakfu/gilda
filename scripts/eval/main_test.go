@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,5 +88,48 @@ func TestATaskNeedsPromptCheckAndRepo(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "task.toml"), []byte("prompt = \"x\"\ncheck = \"true\"\nmodel = \"y\"\n"), 0o644)
 	if _, err := loadTask(dir); err == nil {
 		t.Fatal("an unknown key was accepted")
+	}
+}
+
+// fakeGilda writes a script that stands in for the binary, printing out then running then.
+func fakeGilda(t *testing.T, out, then string) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "gilda")
+	script := "#!/bin/sh\ncat <<'EOF'\n" + out + "\nEOF\n" + then + "\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// A run killed by the timeout still reports the turns and tokens it used, its subagent's included.
+func TestAKilledRunCountsItsTurns(t *testing.T) {
+	out := `{"type":"start","model":"m"}
+{"type":"turn","usage":{"input_tokens":100,"output_tokens":10,"cost":0.5}}
+{"type":"task","turns":3,"usage":{"input_tokens":50,"output_tokens":5,"cost":0.25}}
+{"type":"turn","usage":{"input_tokens":200,"output_tokens":20,"cost":null}}`
+	bin := fakeGilda(t, out, "exec sleep 30")
+	o := options{bin: bin, out: t.TempDir(), n: 1, timeout: time.Second}
+	results, err := runAll(context.Background(), tasks(t)[:1], o, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := results[0]
+	if r.Outcome != "timeout" || r.Turns != 2 || r.Input != 350 || r.Output != 35 || r.Cost != 0.75 || r.Model != "m" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// An error before the first turn would repeat in every run, so the suite stops.
+func TestASetupErrorStopsTheSuite(t *testing.T) {
+	out := `{"type":"result","outcome":"error","error":"llamacpp does not offer model \"x\"","turns":0,"usage":{}}`
+	bin := fakeGilda(t, out, "exit 1")
+	o := options{bin: bin, out: t.TempDir(), n: 2, timeout: time.Minute}
+	results, err := runAll(context.Background(), tasks(t)[:2], o, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "does not offer model") {
+		t.Fatalf("err %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("%d runs after a setup error", len(results))
 	}
 }

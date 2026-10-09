@@ -121,3 +121,32 @@ func TestToolResultImagesAreSent(t *testing.T) {
 		t.Fatalf("%d messages", n)
 	}
 }
+
+// A malformed call is replayed with empty arguments, so the server does not fail on it.
+func TestMalformedArgumentsAreReplayedAsAnEmptyObject(t *testing.T) {
+	srv := llmtest.New(t, turn)
+	h := []llm.Message{
+		{Role: llm.User, Text: "hi"},
+		{Role: llm.Assistant, Calls: []llm.ToolCall{{ID: "call_a", Name: "edit", Arguments: "{\"old_string\":\"a\tb\"}"}}},
+		{Role: llm.Tool, Results: []llm.ToolResult{{CallID: "call_a", Content: "invalid arguments", IsError: true}}},
+	}
+	if _, err := New("llamacpp", "", srv.URL).Stream(context.Background(), llm.Request{Model: "local", Messages: h}, func(llm.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if got := llmtest.Get(srv.Bodies[0], "messages", 1, "tool_calls", 0, "function", "arguments"); got != "{}" {
+		t.Fatalf("arguments %v", got)
+	}
+}
+
+// llama-server sends an SSE comment as a keep-alive while it reads a long prompt. openai-go
+// before v3.51.0 dispatched it as an empty event and failed with "unexpected end of JSON input".
+func TestAKeepAliveCommentIsIgnored(t *testing.T) {
+	srv := llmtest.New(t, ":\n\n"+turn)
+	resp, err := New("llamacpp", "", srv.URL).Stream(context.Background(), llm.Request{Model: "local", Messages: []llm.Message{{Role: llm.User, Text: "hi"}}}, func(llm.Event) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Message.Text != "Hi" {
+		t.Fatalf("text %q", resp.Message.Text)
+	}
+}

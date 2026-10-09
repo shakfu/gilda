@@ -3,7 +3,7 @@ INSTALL_DIR := $(HOME)/.local/bin
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS     := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build test race lint fmt check run repl install clean help
+.PHONY: all build test race lint fmt vuln check run repl install clean help
 
 all: build
 
@@ -24,7 +24,11 @@ lint:
 fmt:
 	@gofmt -w .
 
-check: lint race
+# Needs the network: fetches govulncheck and the vulnerability database.
+vuln:
+	@go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+check: lint race vuln
 
 # Offline smoke tests: no network, no API key.
 run: build
@@ -47,7 +51,8 @@ help:
 	@echo "race      tests under the race detector"
 	@echo "lint      gofmt check and go vet"
 	@echo "fmt       apply gofmt"
-	@echo "check     lint + race; the full gate"
+	@echo "vuln      govulncheck over every package"
+	@echo "check     lint + race + vuln; the full gate"
 	@echo "run       one-shot against the mock provider"
 	@echo "repl      interactive against the mock provider"
 	@echo "install   build, copied to $(INSTALL_DIR)"

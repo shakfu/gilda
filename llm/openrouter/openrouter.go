@@ -146,7 +146,7 @@ func (p *Provider) request(req llm.Request) components.ChatRequest {
 				a.ToolCalls = append(a.ToolCalls, components.ChatToolCall{
 					ID:       c.ID,
 					Type:     components.ChatToolCallTypeFunction,
-					Function: components.ChatToolCallFunction{Name: c.Name, Arguments: c.Arguments},
+					Function: components.ChatToolCallFunction{Name: c.Name, Arguments: llm.Args(c.Arguments)},
 				})
 			}
 			if native, ok := m.NativeFor(p.name, req.Model); ok {

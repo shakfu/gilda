@@ -7,7 +7,7 @@ Items tagged F1-F8 and m1-m10 come from `REVIEW.md` (commit `1156cd0`, review of
 Set 2026-10-04. Each step needs at least one provider key.
 
 1. **Live checks.** Images in a Responses `function_call_output` and through OpenRouter (E5); whether Fable 5.1 and Opus 5.5 accept elided tool results (E1); resuming with a different tool set (E2).
-2. **Eval baseline.** `scripts/eval -n 3` on each cloud provider; record it in `docs/dev/`. No new feature before it exists.
+2. **Eval baseline.** `scripts/eval -n 3` on each cloud provider; record it in `docs/dev/`. No new feature before it exists. A local baseline is in `docs/dev/eval-baseline.md`.
 3. **Measured decisions.** `apply_patch` on and off for an OpenAI model (E6); `task` token savings and overuse; `grep` only if tally shows `bash rg`/`grep` dominate (E3).
 4. **Then, by measured need:** `/compact`, image downscaling, and the deferred features in `REVIEW_FEATURES.md`: O5 process output, O6 web fetch, O7 steering, O8 ACP.
 
@@ -78,8 +78,9 @@ None open.
 
 - [ ] Run `scripts/eval` against each cloud provider, `-n 3`, and record the baseline in `docs/dev/`. Then answer E6: `apply_patch` on and off for an OpenAI model.
 
-- [ ] Add `govulncheck ./...` to `make check`.
+- [x] Add `govulncheck ./...` to `make check`. It found 10 reachable standard-library vulnerabilities, fixed by `toolchain go1.27.2`.
 - [ ] `llm` at 62.9%; test that a `GILDA_LOG` exchange holds no header or body.
+- [ ] `compat` maps no overflow error to `llm.ErrContext`; llama-server answers `400 ... exceeds the available context size` (`docs/dev/eval-baseline.md`).
 - [ ] No fuzz tests; add targets for `words`, `match`, `capture.Write`, `tool.Cap`.
 - [ ] `cmd/gilda` reports 0.0%; use `go build -cover` with `GOCOVERDIR` ([Go docs](https://go.dev/doc/build-cover)).
 
@@ -119,12 +120,12 @@ See `docs/dev/tools.md`.
 
 ### Minor findings
 
-- [ ] **m2**: `-P ollama` with the default endpoint still fetches OpenRouter's price list (`app/app.go:248`).
+- [x] **m2** (fixed: the list loads on the first switch to a cloud provider): `-P ollama` with the default endpoint still fetches OpenRouter's price list (`app/app.go:248`).
 - [x] **m6**: REPL banner and status bar use `os.Getwd()`, not `Options.Root` (`tui/tui.go:498`, `:551`, `:588`).
 - [ ] **m7**: `llm.HTTPClient` and the `SetLog` writer are package globals (`llm/retry.go:46`, `:121`).
 - [x] **m8**: `/help` omits secrets and protected paths from the `auto` description (`tui/commands.go:58`).
-- [ ] **m9**: `version` defaults to `0.1.0` despite Unreleased behaviour changes and the module rename (`cmd/gilda/main.go:26`).
-- [ ] **m10**: `docs/dev/design.md:18` cites myra's `docs/dev/native-providers.md` with no link.
+- [x] **m9** (fixed: from `debug.ReadBuildInfo`): `version` defaults to `0.1.0` despite Unreleased behaviour changes and the module rename (`cmd/gilda/main.go:26`).
+- [x] **m10**: `docs/dev/design.md:18` cites myra's `docs/dev/native-providers.md` with no link.
 
 ### REPL
 

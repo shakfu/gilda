@@ -83,6 +83,18 @@
 
 ### Fixed
 
+- A llama.cpp session ended with "unexpected end of JSON input" when the server took long to read a prompt. llama-server then sends an SSE comment as a keep-alive, and openai-go before v3.51.0 dispatched it as an empty event. openai-go is now v3.51.0, the first release with the fix; it is the smallest step from v3.33.0.
+
+- A tool call with malformed JSON arguments ended the session on llama.cpp. LFM2.5 wrote raw tabs inside an `edit` call's strings; the tool refused the call, but the replayed history then failed every later request with HTTP 500. Chat Completions servers and OpenRouter now get such arguments as `{}`, as Anthropic already did.
+
+- `scripts/eval` reported a run killed by `-timeout` as 0 turns and 0 tokens, so timeouts looked free in the totals. It now counts the run's `turn` and `task` records, and marks it `timeout`, not `error`. A subagent killed mid-run is still not counted, since it writes its record only when it ends.
+
+- `scripts/eval` stops when its first run fails before any turn, such as for an unknown model or a missing key. Before, it ran every task into the same error and printed a table of zeros.
+
+- Builds use Go 1.27.2 through a `toolchain` line in `go.mod`. govulncheck found 10 standard-library vulnerabilities reachable from gilda in 1.27.1, in `net/http`, `crypto/tls` and `net/textproto`. The `go` line stays at 1.27.1, so embedding apps keep their minimum. `make check` now runs govulncheck.
+
+- A session on `llamacpp` or `ollama` at its default endpoint fetched OpenRouter's price list at startup, though a local server bills nothing. The list now loads on the first switch to a cloud provider.
+
 - Two instances that resumed one session overwrote each other's saves, so the conversation saved first was lost. The second to save now continues under a new id and says so.
 
 - `tool.Bash` panicked, in a goroutine no caller could recover, when an embedding app set `Limits.OutputCap` under 1 KiB. A cap under 4 KiB is now raised to 4 KiB, the minimum `settings.toml` already enforced.
@@ -162,6 +174,8 @@
 - A cost estimate uses the highest long-prompt tier the prompt passes. It took the last matching tier in list order, so a price list with tiers out of order priced a long prompt at a lower tier's rate.
 
 ### Changed
+
+- `--version` reports the module version, or a VCS pseudo-version for a local build, in place of a fixed `0.1.0`. `make build` still sets it from `git describe`.
 
 - The REPL status bar marks context use at 85% or more with `!` and a red background. Queued prompts are listed above the input, not only counted. Enter in a picker with no matches keeps it open.
 

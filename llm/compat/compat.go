@@ -133,7 +133,7 @@ func params(req llm.Request) sdk.ChatCompletionNewParams {
 						ID: c.ID,
 						Function: sdk.ChatCompletionMessageFunctionToolCallFunctionParam{
 							Name:      c.Name,
-							Arguments: c.Arguments,
+							Arguments: llm.Args(c.Arguments),
 						},
 					},
 				})

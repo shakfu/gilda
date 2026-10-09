@@ -15,7 +15,7 @@ Recorded 2026-09-23 for 0.1.0.
 
 A provider replays `Native` only for the model that produced it. Otherwise it rebuilds the message from the neutral fields and the reasoning is dropped.
 
-Chosen over one history shape per provider, which would make a mid-session switch impossible. It was also chosen over a neutral-only history, which myra's `docs/dev/native-providers.md` identifies as the place translation loses data. The cost is one `any` field and a type assertion per adapter.
+Chosen over one history shape per provider, which would make a mid-session switch impossible. It was also chosen over a neutral-only history, which myra's [`docs/dev/native-providers.md`](https://github.com/shakfu/myra/blob/main/docs/dev/native-providers.md) identifies as the place translation loses data. The cost is one `any` field and a type assertion per adapter.
 
 Open question: Claude Fable 5.1 and Opus 5.5 reject edited history for accounts created on or after 2026-08-31. A switch away from such a model and back replays its thinking blocks, but the turns in between carry none. Whether the API treats that as an edit is untested.
 

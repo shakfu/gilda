@@ -436,22 +436,35 @@ func (a *App) Prepare(ctx context.Context) ([]error, error) {
 	if err := a.checkModel(ctx, a.ProviderID, a.Agent.Provider, a.Agent.Model); err != nil {
 		return warns, err
 	}
-	// The price list serves every cloud provider a session may switch to. A gateway need not bill
-	// at the vendor's rates, and a local server bills nothing.
-	if a.fetchPrices && (!e.Local() || a.opts.BaseURL == "") {
-		cat, err := price.Load(ctx, a.opts.CacheDir, a.opts.Refresh)
-		if err != nil {
-			warns = append(warns, fmt.Errorf("price list: %w", err))
+	// A local server bills nothing; Switch loads the list if the session moves to a cloud provider.
+	if !e.Local() {
+		if err := a.loadPrices(ctx); err != nil {
+			warns = append(warns, err)
 		}
-		a.mu.Lock()
-		a.prices = cat
-		a.mu.Unlock()
-		if !e.Local() && a.ProviderID != "openrouter" && a.usesVendorURL(a.ProviderID) {
-			a.Agent.Prices = cat
+		if a.ProviderID != "openrouter" && a.usesVendorURL(a.ProviderID) {
+			a.Agent.Prices = a.prices
 		}
 	}
 	a.resolveContext(ctx)
 	return warns, nil
+}
+
+// loadPrices fetches the price list once per session, unless settings.toml turns it off.
+func (a *App) loadPrices(ctx context.Context) error {
+	a.mu.Lock()
+	loaded := a.prices != nil
+	a.mu.Unlock()
+	if !a.fetchPrices || loaded {
+		return nil
+	}
+	cat, err := price.Load(ctx, a.opts.CacheDir, a.opts.Refresh)
+	a.mu.Lock()
+	a.prices = cat
+	a.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("price list: %w", err)
+	}
+	return nil
 }
 
 // resolveContext sets the window from the provider's listing, then OpenRouter's, and whether
@@ -595,7 +608,11 @@ func (a *App) Switch(ctx context.Context, providerID, model string) error {
 
 	a.Agent.Provider, a.ProviderID, a.Agent.Model = p, id, model
 	a.Agent.Prices = nil
-	if e, ok := provider.Find(id); ok && !e.Local() && id != "openrouter" && a.usesVendorURL(id) {
+	e, ok := provider.Find(id)
+	if ok && !e.Local() {
+		_ = a.loadPrices(ctx) // a failed load leaves the session unpriced
+	}
+	if ok && !e.Local() && id != "openrouter" && a.usesVendorURL(id) {
 		a.mu.Lock()
 		a.Agent.Prices = a.prices
 		a.mu.Unlock()

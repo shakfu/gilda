@@ -129,7 +129,7 @@ func (p *Provider) messages(req llm.Request) []sdk.MessageParam {
 				blocks = append(blocks, sdk.NewTextBlock(m.Text))
 			}
 			for _, c := range m.Calls {
-				blocks = append(blocks, sdk.NewToolUseBlock(toolID(c.ID), rawArgs(c.Arguments), c.Name))
+				blocks = append(blocks, sdk.NewToolUseBlock(toolID(c.ID), json.RawMessage(llm.Args(c.Arguments)), c.Name))
 			}
 			if len(blocks) > 0 {
 				out = append(out, sdk.NewAssistantMessage(blocks...))
@@ -207,16 +207,6 @@ func toolID(id string) string {
 		}
 		return '_'
 	}, id)
-}
-
-// rawArgs keeps the model's arguments verbatim when they are a JSON object. Anything else was
-// cut off or malformed, and the API requires an object.
-func rawArgs(s string) json.RawMessage {
-	var obj map[string]json.RawMessage
-	if json.Unmarshal([]byte(s), &obj) != nil {
-		return json.RawMessage("{}")
-	}
-	return json.RawMessage(s)
 }
 
 func wrap(err error) error {

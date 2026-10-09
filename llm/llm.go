@@ -206,5 +206,15 @@ type Provider interface {
 // ErrContext means the request exceeds the model's context window.
 var ErrContext = errors.New("request exceeds the model's context window")
 
+// Args returns a call's arguments for replay: verbatim when they are a JSON object, else "{}".
+// Arguments that were cut off or malformed fail every later request on servers that parse them.
+func Args(s string) string {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(s), &obj) != nil {
+		return "{}"
+	}
+	return s
+}
+
 // Float returns a pointer to f.
 func Float(f float64) *float64 { return &f }
