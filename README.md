@@ -177,7 +177,7 @@ Only names that nearly always hold credentials are built in, since a false posit
 
 #### Trust
 
-An `AGENTS.md` in a cloned repository instructs the agent, and `auto` runs `bash` without asking. So when the mode is `auto` by default or from `settings.toml`, gilda asks once per checkout whether to trust its `AGENTS.md` files and `.agents/skills`, and saves the answer in `state.json`. Declining uses `ask` mode there, in this run and later ones. An explicit `--permissions` or `GILDA_PERMISSIONS` skips the question. With no one to answer, as under `--json` or without a terminal, the run uses `ask` and saves nothing.
+An `AGENTS.md` in a cloned repository instructs the agent, and `auto` runs `bash` without asking. So when the mode is `auto` by default or from `settings.toml`, gilda asks whether to trust a checkout's `AGENTS.md` files and `.agents/skills`, and saves the answer and their content hashes in `state.json`. New or changed content asks again, including any file in a skill's directory. Declining uses `ask` mode there, in this run and later ones. An explicit `--permissions` or `GILDA_PERMISSIONS` skips the question. With no one to answer, as under `--json` or without a terminal, the run uses `ask` and saves nothing.
 
 #### Provider keys
 

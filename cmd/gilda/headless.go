@@ -54,7 +54,7 @@ func headless(parent context.Context, a *app.App, prompt string, asJSON, color b
 			// Not recorded: nobody answered.
 			a.SetPermissions(permission.Ask, a.Ask())
 			if !asJSON {
-				fmt.Fprintf(os.Stderr, "gilda: %s is not trusted yet, so this run uses ask mode; "+
+				fmt.Fprintf(os.Stderr, "gilda: instructions in %s are not trusted yet, so this run uses ask mode; "+
 					"answer in the REPL, or pass --permissions auto\n", tui.Visible(dir))
 			}
 		}

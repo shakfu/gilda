@@ -188,7 +188,7 @@ func escape(s string, strict bool) string {
 // TrustLines explain the question asked before a checkout's AGENTS.md files may instruct an
 // agent in auto mode.
 func TrustLines(st Styles, dir string, files []string) []string {
-	lines := []string{st.Warn.Bold(true).Render(Visible(dir) + " has instructions for the agent:")}
+	lines := []string{st.Warn.Bold(true).Render(Visible(dir) + " has new or changed instructions for the agent:")}
 	for _, f := range files {
 		lines = append(lines, "  "+Visible(f))
 	}

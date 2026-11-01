@@ -136,7 +136,7 @@ type model struct {
 	// trust is the directory waiting for y or n; see app.App.Trust.
 	trust string
 	// always holds what the user allowed until /clear or /permissions: a tool, for one kind of
-	// reason. A secret or protected path is never added.
+	// reason and, for a network tool, one host. A secret or protected path is never added.
 	always map[allowance]bool
 	// Tab cycles through the commands that start with tabSeed; tabLast is the one it set last.
 	tabIdx           int
@@ -501,8 +501,10 @@ func (m *model) approvalKey(msg tea.KeyPressMsg) tea.Cmd {
 		if !q.why.Lasting() {
 			break
 		}
-		m.always[allowance{q.call.Name, q.why.Kind}] = true
-		m.out(m.st.Dim.Render("  " + scope(q.call.Name, q.why.Kind) + " allowed until /clear or /permissions"))
+		for _, a := range allowances(q.call.Name, q.why) {
+			m.always[a] = true
+		}
+		m.out(m.st.Dim.Render("  " + scope(q.call.Name, q.why) + " allowed until /clear or /permissions"))
 		answer(true)
 	case "n", "esc":
 		answer(false)
@@ -517,22 +519,44 @@ func (m *model) approvalKey(msg tea.KeyPressMsg) tea.Cmd {
 // allowed reports whether an earlier "a" covers a call. The agent goroutine calls it too. That is
 // safe because always changes only while the agent waits for an approval or no run is active.
 func (m *model) allowed(name string, why permission.Reason) bool {
-	return why.Lasting() && m.always[allowance{name, why.Kind}]
+	need := allowances(name, why)
+	if !why.Lasting() || len(need) == 0 {
+		return false
+	}
+	for _, a := range need {
+		if !m.always[a] {
+			return false
+		}
+	}
+	return true
 }
 
 // allowance is what "a" at an approval prompt remembers.
 type allowance struct {
 	tool string
 	kind permission.Kind
+	host string
+}
+
+// allowances lists what must be remembered for a call to be covered: one per unlisted host.
+func allowances(name string, why permission.Reason) []allowance {
+	if why.Kind != permission.Host {
+		return []allowance{{tool: name, kind: why.Kind}}
+	}
+	out := make([]allowance, 0, len(why.Hosts))
+	for _, h := range why.Hosts {
+		out = append(out, allowance{name, why.Kind, h})
+	}
+	return out
 }
 
 // scope names the calls an allowance covers, such as "edit outside the working directory".
-func scope(name string, k permission.Kind) string {
-	switch k {
+func scope(name string, why permission.Reason) string {
+	switch why.Kind {
 	case permission.Outside:
 		return name + " outside the working directory"
 	case permission.Host:
-		return name + " to unlisted hosts"
+		return name + " to " + strings.Join(why.Hosts, ", ")
 	}
 	return name
 }
@@ -749,7 +773,7 @@ func (m *model) View() tea.View {
 	if q := m.approval; q != nil {
 		keys := "  y yes | n no | Esc no"
 		if q.why.Lasting() {
-			keys = "  y yes | n no | a always for " + scope(q.call.Name, q.why.Kind) + " | Esc no"
+			keys = "  y yes | n no | a always for " + scope(q.call.Name, q.why) + " | Esc no"
 		}
 		b.WriteString(m.st.Warn.Bold(true).Render("allow the "+q.call.Name+" call above?") + m.st.Dim.Render(keys) + "\n")
 	}

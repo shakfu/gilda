@@ -46,6 +46,28 @@ func press(m *model, k string) {
 	m.Update(tea.KeyPressMsg{Code: rune(k[0]), Text: k})
 }
 
+func TestAlwaysCoversOneHost(t *testing.T) {
+	m := testModel(t)
+	hosts := func(h ...string) permission.Reason {
+		return permission.Reason{Kind: permission.Host, Text: "fetch", Hosts: h}
+	}
+	ask(m, "fetch", hosts("a.com"))
+	reply := m.approval.reply
+	press(m, "a")
+	if ok := <-reply; !ok {
+		t.Fatal("a did not approve the call")
+	}
+	if answered, ok := ask(m, "fetch", hosts("a.com")); !answered || !ok {
+		t.Error("the same host asked again")
+	}
+	for _, h := range [][]string{{"b.com"}, {"a.com", "b.com"}, {}} {
+		m.approval = nil
+		if answered, _ := ask(m, "fetch", hosts(h...)); answered {
+			t.Errorf("hosts %v were approved by an earlier a", h)
+		}
+	}
+}
+
 func TestAlwaysCoversOneToolAndKind(t *testing.T) {
 	m := testModel(t)
 	outside := permission.Reason{Kind: permission.Outside, Text: "edit outside /r"}
@@ -265,7 +287,7 @@ func TestPickerKeys(t *testing.T) {
 func TestAllowedCallsSkipThePreview(t *testing.T) {
 	m := testModel(t)
 	outside := permission.Reason{Kind: permission.Outside, Text: "edit outside /r"}
-	m.always[allowance{"edit", permission.Outside}] = true
+	m.always[allowance{tool: "edit", kind: permission.Outside}] = true
 	previews := 0
 	ask := askVia(make(chan tea.Msg), func(tool.Tool, llm.ToolCall) string { previews++; return "diff" }, m.allowed)
 	ctx, cancel := context.WithCancel(context.Background())

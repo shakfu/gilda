@@ -22,7 +22,7 @@
 
 - `read` returns PNG, JPEG, GIF and WebP files up to 3 MiB as images, so the model can look at a screenshot or a rendered chart. Anthropic and OpenAI get the image inside the tool result. OpenRouter and the Chat Completions servers get it in a user message after the results, since Chat Completions takes images only from the user. Images go only to a model that accepts them: one OpenRouter's list marks so, or one of the `anthropic` or `openai` models it does not list. Other models, local servers included, get a note in its place, since one rejected image would fail every later request. Old images are elided with old tool results. `llm.ToolResult.Images`, `tool.Result.Images` and `agent.Config.Images` carry them for embedding apps.
 
-- `edit`, and `write` over an existing file, refuse a file the model has not read in this conversation, or one changed since its last read. Before, an edit made from an old read applied wherever `old_string` still matched, though the text around it could have changed. A `write` could replace a file the model had never seen. A new file needs no read, and each edit or write records the file it leaves. The check compares size and modification time, so a change that keeps both is not caught. For embedding apps, `tool.Env.Seen` turns it on; `app.New` sets it, and `App.Reset` clears it.
+- `edit`, and `write` over an existing file, refuse a file the model has not read in this conversation, or one changed since its last read. Before, an edit made from an old read applied wherever `old_string` still matched, though the text around it could have changed. A `write` could replace a file the model had never seen. A new file needs no read, and each edit or write records the file it leaves. The check compares size, modification time and a content hash. For embedding apps, `tool.Env.Seen` turns it on; `app.New` sets it, and `App.Reset` clears it.
 
 - `read` on a directory lists its entries, sorted and numbered, with `offset` and `limit` as for lines. It used to fail. In `read-only` mode, where `bash` is refused, the model could not find a file it did not already know the path of. A listing in `read` was chosen over a separate `list` or `glob` tool because it adds no tool definition to every request.
 
@@ -82,6 +82,14 @@
 - `go run ./scripts/tally run.jsonl ...` counts tool use in `--json` output per model: calls, failures and output bytes for each tool, with `bash` split by the programs a command runs. See `docs/dev/tools.md`.
 
 ### Fixed
+
+- `a` at an approval for a network tool allowed every unlisted host for the rest of the session, since an allowance was keyed on tool and reason kind only. It now covers the hosts shown. A call naming several unlisted hosts lists them all; the prompt used to name only the first.
+
+- A trusted checkout that later pulled a changed `AGENTS.md` or skill was not asked about again, since trust was keyed on the path alone. `state.json` now keeps content hashes of those files and everything else in a skill's directory, and new content asks, so a checkout trusted before this change asks once. A set of hashes was chosen over one hash per checkout, so switching branches or working in a subdirectory asks only about content not yet approved. With no one to answer, as in a CI run with `-p`, a changed file means `ask` mode, so calls that need approval are refused; set `--permissions` explicitly there.
+
+- `edit` and `write` missed a file changed within the filesystem's timestamp resolution with its size kept. The check now also compares a content hash.
+
+- `compat` reported llama-server's context overflow as a plain error, so a full context was not recognised as one. It now maps that error and OpenAI's `context_length_exceeded` to `llm.ErrContext`.
 
 - A llama.cpp session ended with "unexpected end of JSON input" when the server took long to read a prompt. llama-server then sends an SSE comment as a keep-alive, and openai-go before v3.51.0 dispatched it as an empty event. openai-go is now v3.51.0, the first release with the fix; it is the smallest step from v3.33.0.
 

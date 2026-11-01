@@ -40,7 +40,10 @@ type State struct {
 	// Trust records, by directory, whether the user let its AGENTS.md files instruct an agent
 	// that runs bash without asking.
 	Trust map[string]bool `json:"trust,omitempty"`
-	dir   string
+	// TrustedFiles holds, by directory, the content hashes of the instruction files the user
+	// trusted. Any other content asks again, so a pull cannot change them unnoticed.
+	TrustedFiles map[string][]string `json:"trusted_files,omitempty"`
+	dir          string
 }
 
 // Load returns the state saved in dir, or an empty one. An empty dir means StateDir.

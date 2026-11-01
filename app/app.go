@@ -6,9 +6,12 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -254,10 +257,10 @@ func New(opts Options) (*App, error) {
 		if dir, files := checkout(opts.Root, promptOpts); len(files) > 0 {
 			trusted, answered := a.State.Trust[dir]
 			switch {
-			case !answered:
-				a.trustDir = dir
-			case !trusted:
+			case answered && !trusted:
 				mode, a.distrusted = permission.Ask, true
+			case !answered || len(unapproved(a.State.TrustedFiles[dir], files)) > 0:
+				a.trustDir = dir
 			}
 		}
 	}
@@ -761,22 +764,61 @@ func checkout(root string, o prompt.Options) (string, []string) {
 	}
 	if !o.NoSkills {
 		for _, s := range prompt.Skills(prompt.ProjectSkillsDir(root)) {
-			files = append(files, s.Path)
+			files = append(files, skillFiles(s.Path)...)
 		}
 	}
 	return dir, files
 }
 
-// Trust returns a directory whose AGENTS.md files and skills, listed, would instruct an agent that runs
-// bash without asking, when the user has not yet said whether to trust it. It returns "" when
-// no answer is needed: the mode was set explicitly, is not auto, or the directory was answered
-// before. A cloned repository could otherwise direct the agent before the user has read it.
+// skillFiles lists the file at skill and the rest of its directory: a skill can tell the agent
+// to run a script beside it.
+func skillFiles(skill string) []string {
+	files := []string{skill}
+	filepath.WalkDir(filepath.Dir(skill), func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && p != skill {
+			files = append(files, p)
+		}
+		return nil
+	})
+	return files
+}
+
+// unapproved returns the files whose content has no hash in known. An unreadable file is left
+// out, since the system prompt cannot include it either.
+func unapproved(known, files []string) []string {
+	var out []string
+	for _, f := range files {
+		if sum := fileSum(f); sum != "" && !slices.Contains(known, sum) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func fileSum(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// Trust returns a directory and its AGENTS.md files and skills that would instruct an agent that
+// runs bash without asking, when the user has not trusted them as they now are. It returns "" when
+// no answer is needed: the mode was set explicitly, is not auto, the directory was declined, or
+// its files are unchanged since they were trusted. A cloned repository could otherwise direct the
+// agent before the user has read it.
 func (a *App) Trust() (string, []string) {
 	if a.trustDir == "" {
 		return "", nil
 	}
 	_, files := checkout(a.opts.Root, a.promptOpts)
-	return a.trustDir, files
+	return a.trustDir, unapproved(a.State.TrustedFiles[a.trustDir], files)
 }
 
 // SetTrust records the user's answer for dir. Declining switches to ask mode, now and in later
@@ -791,6 +833,15 @@ func (a *App) SetTrust(dir string, ok bool) error {
 		a.State.Trust = map[string]bool{}
 	}
 	a.State.Trust[dir] = ok
+	if ok {
+		if a.State.TrustedFiles == nil {
+			a.State.TrustedFiles = map[string][]string{}
+		}
+		_, files := checkout(a.opts.Root, a.promptOpts)
+		for _, f := range unapproved(a.State.TrustedFiles[dir], files) {
+			a.State.TrustedFiles[dir] = append(a.State.TrustedFiles[dir], fileSum(f))
+		}
+	}
 	return a.State.Save()
 }
 

@@ -674,6 +674,80 @@ func TestEditAndWriteNeedACurrentRead(t *testing.T) {
 	}
 }
 
+// A change that keeps the size and modification time is still a change.
+func TestEditAndWriteCatchASameStampChange(t *testing.T) {
+	e := env(t)
+	e.Seen = &Seen{}
+	f := filepath.Join(e.Root, "f.txt")
+	write(t, f, "one\ntwo\n")
+	info, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func() {
+		t.Helper()
+		// A partial read still hashes the whole file.
+		if _, err := (Read{e}).Run(context.Background(), args(t, map[string]any{"path": "f.txt", "limit": 1})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	swap := func(content string) {
+		t.Helper()
+		write(t, f, content)
+		if err := os.Chtimes(f, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read()
+	swap("one\nTWO\n")
+	calls := []struct {
+		tl   Tool
+		args map[string]any
+	}{
+		{Edit{e}, map[string]any{"path": "f.txt", "old_string": "one", "new_string": "1"}},
+		{Write{e}, map[string]any{"path": "f.txt", "content": "x"}},
+	}
+	for _, c := range calls {
+		_, err := c.tl.Run(context.Background(), args(t, c.args))
+		if err == nil || !strings.Contains(err.Error(), "changed since it was last read") {
+			t.Errorf("%T after a same-stamp change: %v", c.tl, err)
+		}
+	}
+	read()
+	if _, err := (Edit{e}).Run(context.Background(), args(t, calls[0].args)); err != nil {
+		t.Fatalf("edit after a new read: %v", err)
+	}
+}
+
+// A binary file is hashed too, past what read looks at.
+func TestWriteCatchesASameStampBinaryChange(t *testing.T) {
+	e := env(t)
+	e.Seen = &Seen{}
+	f := filepath.Join(e.Root, "b.bin")
+	data := make([]byte, 1<<20)
+	if err := os.WriteFile(f, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Read{e}).Run(context.Background(), args(t, map[string]any{"path": "b.bin"})); err != nil {
+		t.Fatal(err)
+	}
+	data[len(data)-1] = 1
+	if err := os.WriteFile(f, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(f, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	_, err = (Write{e}).Run(context.Background(), args(t, map[string]any{"path": "b.bin", "content": "x"}))
+	if err == nil || !strings.Contains(err.Error(), "changed since it was last read") {
+		t.Fatalf("write after a same-stamp change: %v", err)
+	}
+}
+
 func TestReadReturnsAnImage(t *testing.T) {
 	e := env(t)
 	var buf bytes.Buffer

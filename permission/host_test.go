@@ -3,6 +3,8 @@ package permission
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/shakfu/gilda/llm"
@@ -96,5 +98,21 @@ func TestNetworkDecisions(t *testing.T) {
 	}
 	if err := (Rules{Hosts: []string{"https://x.com"}}).Validate(); err == nil {
 		t.Error("accepted a URL as a host")
+	}
+}
+
+// Every unlisted host is named, so an approval covers what the call reaches.
+func TestAReasonNamesEveryUnlistedHost(t *testing.T) {
+	fetch, err := tool.New(tool.Def{
+		Name:  "fetch",
+		Hosts: func(json.RawMessage) ([]string, error) { return []string{"A.com:443", "ok.com", "b.com", "a.com"}, nil },
+		Run:   func(context.Context, json.RawMessage) (tool.Result, error) { return tool.Result{}, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, why := Layers{{Hosts: []string{"ok.com"}}}.decide(Auto, t.TempDir(), fetch, llm.ToolCall{Name: "fetch", Arguments: "{}"})
+	if v != askUser || !slices.Equal(why.Hosts, []string{"a.com", "b.com"}) || !strings.Contains(why.Text, "a.com, b.com, which are") {
+		t.Fatalf("verdict %d, reason %+v", v, why)
 	}
 }

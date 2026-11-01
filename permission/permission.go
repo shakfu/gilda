@@ -80,12 +80,14 @@ type Reason struct {
 	Kind Kind
 	// Text is for the user and the model, such as "read of .env, which may hold secrets".
 	Text string
+	// Hosts are the normalized unlisted hosts of a Host reason.
+	Hosts []string
 }
 
 func (r Reason) String() string { return r.Text }
 
 // Lasting reports whether an approval may be remembered for later calls of the same tool with
-// the same Kind. Secrets and protected paths are approved one call at a time, since remembering
+// the same Kind and, for Host, the same hosts. Secrets and protected paths are approved one call at a time, since remembering
 // one would lift a built-in rule.
 func (r Reason) Lasting() bool { return r.Kind != Secret && r.Kind != Protected }
 
@@ -143,12 +145,12 @@ func (r Layers) decide(mode Mode, root string, t tool.Tool, call llm.ToolCall) (
 	_, isBash := t.(tool.Bash)
 	switch mode {
 	case ReadOnly:
-		return refuse, Reason{General, name + ", which can change the environment,"}
+		return refuse, Reason{Kind: General, Text: name + ", which can change the environment,"}
 	case Ask:
 		if isBash && r.allows(call) {
 			return run, Reason{}
 		}
-		return askUser, r.sensitive(root, name, paths, Reason{General, name})
+		return askUser, r.sensitive(root, name, paths, Reason{Kind: General, Text: name})
 	}
 	// Auto. bash is recognised by its type, so a custom tool cannot take its policy by name.
 	if isBash {
@@ -167,8 +169,12 @@ func (r Layers) network(mode Mode, root string, t tool.Tool, ht tool.Hosts, call
 		// The tool rejects invalid arguments; there is nothing to reach.
 		return run, Reason{}
 	}
-	if host := r.unlisted(hosts); host != "" {
-		why := Reason{Host, fmt.Sprintf("%s to %s, which is not in the hosts allowlist", name, host)}
+	if out := r.unlisted(hosts); len(out) > 0 {
+		verb := "is"
+		if len(out) > 1 {
+			verb = "are"
+		}
+		why := Reason{Kind: Host, Text: fmt.Sprintf("%s to %s, which %s not in the hosts allowlist", name, strings.Join(out, ", "), verb), Hosts: out}
 		if mode == ReadOnly {
 			return refuse, why
 		}
@@ -179,9 +185,9 @@ func (r Layers) network(mode Mode, root string, t tool.Tool, ht tool.Hosts, call
 	}
 	switch mode {
 	case ReadOnly:
-		return refuse, Reason{General, name + ", which can write files,"}
+		return refuse, Reason{Kind: General, Text: name + ", which can write files,"}
 	case Ask:
-		return askUser, r.sensitive(root, name, paths, Reason{General, name})
+		return askUser, r.sensitive(root, name, paths, Reason{Kind: General, Text: name})
 	}
 	return r.writes(root, t, name, paths, perr)
 }
@@ -189,7 +195,7 @@ func (r Layers) network(mode Mode, root string, t tool.Tool, ht tool.Hosts, call
 // writes judges a modifying call in auto mode by the paths it declares.
 func (r Layers) writes(root string, t tool.Tool, name string, paths []string, perr error) (verdict, Reason) {
 	if _, ok := t.(tool.Paths); !ok {
-		return askUser, Reason{Undeclared, name + ", which declares no paths,"}
+		return askUser, Reason{Kind: Undeclared, Text: name + ", which declares no paths,"}
 	}
 	if perr != nil {
 		// The tool rejects invalid arguments; there is nothing to confine.
@@ -198,7 +204,7 @@ func (r Layers) writes(root string, t tool.Tool, name string, paths []string, pe
 	outside := Reason{}
 	for _, p := range paths {
 		if !Inside(root, p) {
-			outside = Reason{Outside, fmt.Sprintf("%s outside %s", name, root)}
+			outside = Reason{Kind: Outside, Text: fmt.Sprintf("%s outside %s", name, root)}
 			break
 		}
 	}
@@ -218,18 +224,19 @@ func (r Layers) sensitive(root, name string, paths []string, def Reason) Reason 
 			return secretReason(name, p)
 		}
 		if part := r.Protects(root, p); part != "" {
-			return Reason{Protected, fmt.Sprintf("%s under %s", name, part)}
+			return Reason{Kind: Protected, Text: fmt.Sprintf("%s under %s", name, part)}
 		}
 	}
 	return def
 }
 
 func secretReason(name, path string) Reason {
-	return Reason{Secret, fmt.Sprintf("%s of %s, which may hold secrets", name, filepath.Base(path))}
+	return Reason{Kind: Secret, Text: fmt.Sprintf("%s of %s, which may hold secrets", name, filepath.Base(path))}
 }
 
-// unlisted returns the first host no layer allows, or "".
-func (r Layers) unlisted(hosts []string) string {
+// unlisted returns, normalized, every host no layer allows.
+func (r Layers) unlisted(hosts []string) []string {
+	var out []string
 	for _, h := range hosts {
 		ok := false
 		for _, rules := range r {
@@ -238,11 +245,11 @@ func (r Layers) unlisted(hosts []string) string {
 				break
 			}
 		}
-		if !ok {
-			return h
+		if n := normalHost(h); !ok && !slices.Contains(out, n) {
+			out = append(out, n)
 		}
 	}
-	return ""
+	return out
 }
 
 // declared returns the paths a call names, when its tool declares them.

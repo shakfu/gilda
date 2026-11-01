@@ -2,7 +2,10 @@ package compat
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -61,6 +64,25 @@ func TestAStreamWithoutAFinishReasonIsAnError(t *testing.T) {
 	_, err := New("llamacpp", "", srv.URL).Stream(context.Background(), llm.Request{Model: "m", Messages: []llm.Message{{Role: llm.User, Text: "hi"}}}, func(llm.Event) {})
 	if err == nil {
 		t.Fatal("a cut stream was taken as complete")
+	}
+}
+
+func TestContextOverflowIsReported(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"error":{"code":400,"message":"request (40000 tokens) exceeds the available context size (32768 tokens), try increasing it","type":"exceed_context_size_error"}}`: true,
+		`{"error":{"code":"context_length_exceeded","message":"too long"}}`:                                                                                                 true,
+		`{"error":{"code":400,"message":"bad tool schema"}}`:                                                                                                                false,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, body)
+		}))
+		_, err := New("llamacpp", "", srv.URL).Stream(context.Background(), llm.Request{Model: "m", Messages: []llm.Message{{Role: llm.User, Text: "hi"}}}, func(llm.Event) {})
+		srv.Close()
+		if err == nil || errors.Is(err, llm.ErrContext) != want {
+			t.Errorf("%s: err %v, want ErrContext %v", body, err, want)
+		}
 	}
 }
 

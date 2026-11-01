@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,14 +76,38 @@ func (r Read) Run(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if info.IsDir() {
 		return r.list(f, a)
 	}
-	r.Seen.record(r.abs(a.Path), info)
+	// Recorded without a hash in case the file cannot be read to its end.
+	r.Seen.record(r.abs(a.Path), info, nil)
 
-	br := bufio.NewReaderSize(f, 64<<10)
+	sum := sha256.New()
+	br := bufio.NewReaderSize(io.TeeReader(f, sum), 64<<10)
+	// finish consumes what is left and records the hash; a text file is already at its end.
+	finish := func() error {
+		for buf := make([]byte, 64<<10); ; {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if _, err := br.Read(buf); errors.Is(err, io.EOF) {
+				break
+			} else if err != nil {
+				return err
+			}
+		}
+		r.Seen.record(r.abs(a.Path), info, sum.Sum(nil))
+		return nil
+	}
 	head, _ := br.Peek(8 << 10)
 	if mt := imageType(head); mt != "" {
-		return readImage(br, info, a.Path, mt)
+		res, err := readImage(br, info, a.Path, mt)
+		if err == nil {
+			err = finish()
+		}
+		return res, err
 	}
 	if bytes.IndexByte(head, 0) >= 0 {
+		if err := finish(); err != nil {
+			return Result{}, err
+		}
 		return Result{Output: fmt.Sprintf("%s is binary, %d bytes", a.Path, info.Size()), Summary: "binary"}, nil
 	}
 
@@ -113,6 +138,9 @@ func (r Read) Run(ctx context.Context, raw json.RawMessage) (Result, error) {
 			shown++
 			cut = cut || long
 		}
+	}
+	if err := finish(); err != nil {
+		return Result{}, err
 	}
 	if shown == 0 {
 		msg := fmt.Sprintf("%s has %d lines; none at offset %d", a.Path, total, start)

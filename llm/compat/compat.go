@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"strings"
 
 	sdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -68,7 +70,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request, emit func(llm.Ev
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return llm.Response{}, err
+		return llm.Response{}, wrap(err)
 	}
 	if len(acc.Choices) == 0 || acc.Choices[0].FinishReason == "" {
 		return llm.Response{}, llm.Incomplete(ctx)
@@ -99,6 +101,18 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request, emit func(llm.Ev
 		},
 		Stop: stop,
 	}, nil
+}
+
+// wrap maps a context overflow to llm.ErrContext: llama-server's wording, or the code other
+// servers copy from OpenAI.
+func wrap(err error) error {
+	var apierr *sdk.Error
+	if errors.As(err, &apierr) && apierr.StatusCode == http.StatusBadRequest {
+		if s := apierr.Error(); strings.Contains(s, "exceeds the available context size") || strings.Contains(s, "context_length_exceeded") {
+			return errors.Join(llm.ErrContext, err)
+		}
+	}
+	return err
 }
 
 func params(req llm.Request) sdk.ChatCompletionNewParams {

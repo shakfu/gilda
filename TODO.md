@@ -38,7 +38,7 @@ None open.
 ### Feature gaps
 
 - [x] **E4**: `edit`, `write` over a file and `apply_patch` refuse a file not read since it last changed (`tool/seen.go`).
-  - [ ] The check compares size and modification time; a same-size change within the filesystem's timestamp resolution passes.
+  - [x] A same-size change within the filesystem's timestamp resolution passed. Fixed by a content hash.
 
 - [x] **E5**: `read` returns images to models that accept them (`tool/read.go`, `llm.ToolResult.Images`).
   - [ ] Images over 3 MiB are refused, not downscaled.
@@ -69,8 +69,9 @@ None open.
 
 ### Permissions follow-ups
 
-- [ ] `a` for a network tool covers every unlisted host, since an allowance is keyed on tool and reason kind. Consider keying `permission.Host` on the host too.
-- [ ] Trust is keyed on the checkout's path. A trusted repository that later pulls a hostile `AGENTS.md` is not asked again. Consider storing a hash of the files.
+- [x] `a` for a network tool covered every unlisted host. An allowance is now keyed on the host too.
+- [x] A trusted repository that later pulled a hostile `AGENTS.md` was not asked again. Content hashes are now stored, and new content asks.
+  - [ ] Show what changed at the prompt. It lists file names; showing a diff needs the old content saved.
 
 ### Testing
 
@@ -79,8 +80,10 @@ None open.
 - [ ] Run `scripts/eval` against each cloud provider, `-n 3`, and record the baseline in `docs/dev/`. Then answer E6: `apply_patch` on and off for an OpenAI model.
 
 - [x] Add `govulncheck ./...` to `make check`. It found 10 reachable standard-library vulnerabilities, fixed by `toolchain go1.27.2`.
-- [ ] `llm` at 62.9%; test that a `GILDA_LOG` exchange holds no header or body.
-- [ ] `compat` maps no overflow error to `llm.ErrContext`; llama-server answers `400 ... exceeds the available context size` (`docs/dev/eval-baseline.md`).
+- [x] Test that a `GILDA_LOG` exchange holds no request header or body (`TestLogOmitsRequestBodiesAndHeaders`).
+- [ ] `llm` at 63.3%.
+- [x] `compat` maps llama-server's overflow error and OpenAI's `context_length_exceeded` to `llm.ErrContext`.
+- [ ] ollama reports no overflow: by [`server/routes.go`](https://github.com/ollama/ollama/blob/main/server/routes.go) its chat route truncates old messages unless `truncate` is false, and [`openai/openai.go`](https://github.com/ollama/ollama/blob/main/openai/openai.go) does not mention `truncate`. So gilda on ollama may lose history with no error. Read from source, not reproduced.
 - [ ] No fuzz tests; add targets for `words`, `match`, `capture.Write`, `tool.Cap`.
 - [ ] `cmd/gilda` reports 0.0%; use `go build -cover` with `GOCOVERDIR` ([Go docs](https://go.dev/doc/build-cover)).
 
