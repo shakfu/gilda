@@ -37,6 +37,10 @@ go.work.sum
 # Build output
 /bin/
 
+# pma
+.pma
+
+# agents
 .claude
 CLAUDE.md
 AGENTS.md
