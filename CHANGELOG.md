@@ -4,6 +4,8 @@
 
 ### Added
 
+- `gilda [flags] PROMPT...` starts the REPL and sends PROMPT as its first entry, so a launcher can open a session that starts working at once. With `--continue` or `--resume` it is the next turn of that session; with `-p` it is refused.
+
 - `/sessions` lists the conversations saved for the working directory, and `/resume [id]` continues one without leaving the REPL, keeping the provider and model. Without an id it opens a picker.
 
 - `task` runs a subagent on a self-contained research question and returns only its final answer. Exploring a codebase filled the context with file contents and search output the conversation never needed again; a subagent keeps them in a history of its own. It uses the caller's provider, model and approvals, with `read` and `bash` only and a read record of its own, so the caller still reads a file before editing it. Its calls show marked `[task]`, `--json` adds a `task` record with its usage, and its cost counts in the session. A subagent cannot start another. On by default; `[tools] task = false` turns it off. `agent.Task` builds one for embedding apps.

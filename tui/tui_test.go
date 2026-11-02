@@ -458,3 +458,79 @@ func TestLongTurnsGetAttention(t *testing.T) {
 		}
 	}
 }
+
+// drain feeds a run's messages to the model until the run ends.
+func drain(t *testing.T, m *model) {
+	t.Helper()
+	for m.running {
+		select {
+		case msg := <-m.events:
+			m.Update(msg)
+		case <-time.After(5 * time.Second):
+			t.Fatal("the run did not end")
+		}
+	}
+}
+
+func TestPromptOptionIsTheFirstEntry(t *testing.T) {
+	dir := t.TempDir()
+	a, err := app.New(app.Options{Mock: "../mock/say-hi.json", Root: dir, StateDir: dir, CacheDir: dir, ConfigDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), a, Options{Prompt: "  fix the build  "})
+	defer m.tasks.wait()
+	if m.running {
+		t.Fatal("the prompt started before the REPL was ready")
+	}
+	m.Update(prepMsg{})
+	if !m.running || m.prompts != 1 || len(m.queue) != 0 {
+		t.Fatalf("running %v prompts %d queue %v", m.running, m.prompts, m.queue)
+	}
+	drain(t, m)
+	h := a.Agent.History
+	if len(h) < 2 || h[0].Role != llm.User || h[0].Text != "fix the build" {
+		t.Fatalf("history %+v", h)
+	}
+	if n := len(m.hist.Entries); n == 0 || m.hist.Entries[n-1] != "fix the build" || m.input.Placeholder != "" {
+		t.Errorf("history entries %v placeholder %q", m.hist.Entries, m.input.Placeholder)
+	}
+}
+
+func TestNoPromptOptionWaitsForInput(t *testing.T) {
+	m := testModel(t)
+	if m.running || m.prompts != 0 || len(m.queue) != 0 {
+		t.Fatalf("running %v prompts %d queue %v", m.running, m.prompts, m.queue)
+	}
+}
+
+// With --continue, the prompt is the next turn of the resumed conversation.
+func TestPromptOptionContinuesAResumedSession(t *testing.T) {
+	dir, root := t.TempDir(), t.TempDir()
+	opts := app.Options{Mock: "../mock/say-hi.json", Root: root, StateDir: dir, CacheDir: dir, ConfigDir: dir}
+	first, err := app.New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Agent.Run(context.Background(), "earlier", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Save(); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	opts.Continue = true
+	a, err := app.New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), a, Options{Prompt: "and now"})
+	defer m.tasks.wait()
+	m.Update(prepMsg{})
+	drain(t, m)
+	h := a.Agent.History
+	if len(h) < 4 || h[0].Text != "earlier" || h[2].Role != llm.User || h[2].Text != "and now" || a.Agent.SessionID != first.Agent.SessionID {
+		t.Fatalf("history %+v", h)
+	}
+}

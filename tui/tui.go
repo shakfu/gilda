@@ -33,6 +33,8 @@ import (
 type Options struct {
 	Version string
 	Color   bool
+	// Prompt is submitted as the first entry once the REPL is ready, as if typed.
+	Prompt string
 }
 
 // Run starts the REPL and returns when the user leaves it.
@@ -167,6 +169,12 @@ func newModel(ctx context.Context, a *app.App, opts Options) *model {
 		width: 80, input: in, hist: hist, histPos: len(hist.Entries),
 		spin: spinner.New(spinner.WithSpinner(spinner.Line), spinner.WithStyle(st.Warn)),
 		busy: "loading", always: map[allowance]bool{},
+	}
+	if text := strings.TrimSpace(opts.Prompt); text != "" {
+		m.input.Placeholder = ""
+		m.hist.Add(text)
+		m.histPos = len(m.hist.Entries)
+		m.queue = append(m.queue, text)
 	}
 	m.sync()
 	return m

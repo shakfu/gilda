@@ -126,8 +126,26 @@ func TestErrorsExitOneAndAppearInTheResult(t *testing.T) {
 }
 
 func TestUsageErrorsExitTwo(t *testing.T) {
-	for _, args := range [][]string{{"--json"}, {"stray"}, {"-p", "x", "--effort", "extreme"}} {
+	for _, args := range [][]string{{"--json"}, {"-p", "x", "--effort", "extreme"}, {"  "}} {
 		if _, stderr, code := gilda(t, "", args...); code != 2 || !strings.HasPrefix(stderr, "gilda:") {
+			t.Errorf("%v: exit %d stderr %q", args, code, stderr)
+		}
+	}
+}
+
+func TestPositionalPromptWithDashPIsRefused(t *testing.T) {
+	_, stderr, code := gilda(t, script, "-p", "go", "also", "this")
+	if code != 2 || !strings.Contains(stderr, "not both") {
+		t.Fatalf("exit %d stderr %q", code, stderr)
+	}
+}
+
+// A positional prompt starts the REPL, so flags before and after it still parse and, with no
+// terminal here, the run stops at the REPL's terminal check.
+func TestPositionalPromptStartsTheREPL(t *testing.T) {
+	for _, args := range [][]string{{"-m", "x", "do", "it"}, {"do it", "--permissions", "auto"}, {}} {
+		_, stderr, code := gilda(t, script, args...)
+		if code != 2 || !strings.Contains(stderr, "the REPL needs a terminal") {
 			t.Errorf("%v: exit %d stderr %q", args, code, stderr)
 		}
 	}

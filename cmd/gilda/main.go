@@ -36,6 +36,8 @@ func init() {
 type flags struct {
 	app.Options
 	prompt string
+	// first is the REPL's first entry, from the positional words.
+	first string
 	// headless is set by an explicit -p, even one whose stdin turns out empty.
 	headless bool
 	json     bool
@@ -51,16 +53,24 @@ func (e exitError) Error() string { return fmt.Sprintf("exit %d", int(e)) }
 func main() {
 	var f flags
 	cmd := &cobra.Command{
-		Use:   "gilda",
+		Use:   "gilda [flags] [PROMPT...]",
 		Short: "A coding agent for the terminal",
-		Long: "gilda is a coding agent. Without -p it starts a REPL; with -p it answers one\n" +
-			"prompt and exits.",
+		Long: "gilda is a coding agent. Without -p it starts a REPL, sending PROMPT, if given,\n" +
+			"as the first entry; with -p it answers one prompt and exits.",
 		Version:       version,
-		Args:          cobra.NoArgs,
+		Args:          cobra.ArbitraryArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			f.headless = cmd.Flags().Changed("prompt")
+			if len(args) > 0 {
+				if f.headless {
+					return errors.New("give the prompt either with -p or as arguments, not both")
+				}
+				if f.first = strings.Join(args, " "); strings.TrimSpace(f.first) == "" {
+					return errors.New("the prompt is empty")
+				}
+			}
 			if !cmd.Flags().Changed("api-key") {
 				f.APIKey = os.Getenv("GILDA_API_KEY")
 			} else if !f.json {
@@ -215,7 +225,7 @@ func run(f flags) int {
 		fmt.Fprintln(os.Stderr, "gilda: the REPL needs a terminal; pass -p for a one-shot run")
 		return 2
 	}
-	if err := tui.Run(ctx, a, tui.Options{Version: version, Color: color}); err != nil && got.Load() == 0 {
+	if err := tui.Run(ctx, a, tui.Options{Version: version, Color: color, Prompt: f.first}); err != nil && got.Load() == 0 {
 		fmt.Fprintln(os.Stderr, "gilda:", err)
 		return 1
 	}

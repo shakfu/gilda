@@ -14,11 +14,11 @@ Requires Go 1.27. Unix only: `bash` relies on process groups.
 
 ```sh
 % gilda -h
-gilda is a coding agent. Without -p it starts a REPL; with -p it answers one
-prompt and exits.
+gilda is a coding agent. Without -p it starts a REPL, sending PROMPT, if given,
+as the first entry; with -p it answers one prompt and exits.
 
 Usage:
-  gilda [flags]
+  gilda [flags] [PROMPT...]
 
 Flags:
   -P, --provider ID          ID: anthropic, openai, openrouter, llamacpp,
@@ -292,6 +292,8 @@ The system prompt and tool descriptions are fixed for a session, so these settin
 | Esc | cancel the turn |
 | Ctrl-C | cancel the turn, else clear the input, else quit |
 | Ctrl-D | quit on an empty line |
+
+`gilda [flags] PROMPT...` starts the REPL and sends the words, joined by spaces, as the first entry, then stays open. With `--continue` or `--resume` the prompt is the next turn of the resumed session. A prompt given both as arguments and with `-p` is refused. It is sent as a prompt even when it starts with `/`.
 
 A turn that has run for 30 seconds rings the terminal bell when it ends or waits for an approval, so a user who switched away hears it. `notify = "osc9"` under `[repl]` sends a desktop notification instead, in terminals that support OSC 9, such as iTerm2 and WezTerm; under tmux it needs passthrough. `notify = "off"` turns both off.
 
