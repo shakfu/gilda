@@ -4,6 +4,8 @@
 
 ### Added
 
+- In a [Herdr](https://herdr.dev/tui/docs/add-herdr-support/) pane, the REPL reports itself as agent `gilda`: `working` during a turn, `blocked` at an approval or the trust question, `idle` otherwise. Quitting releases the pane. Once a session is saved, Herdr gets `gilda --resume ID -C ROOT` to rerun after a restart. A non-`auto` mode is passed as `--permissions`. `auto` is left out, so the resumed REPL asks the trust question again if the model wrote an `AGENTS.md`. A signal exit keeps the resume command. Resume needs `gilda` on `PATH`. Reports run in the background with a 2 s timeout, and failures are ignored.
+
 - `gilda [flags] PROMPT...` starts the REPL and sends PROMPT as its first entry, so a launcher can open a session that starts working at once. With `--continue` or `--resume` it is the next turn of that session; with `-p` it is refused.
 
 - `/sessions` lists the conversations saved for the working directory, and `/resume [id]` continues one without leaving the REPL, keeping the provider and model. Without an id it opens a picker.

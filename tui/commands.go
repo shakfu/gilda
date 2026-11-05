@@ -179,6 +179,7 @@ func (m *model) resume(id string) tea.Cmd {
 		return nil
 	}
 	clear(m.always)
+	m.herdrReport("idle", "")
 	m.resumedLines()
 	for _, w := range warns {
 		m.out(m.st.Warn.Render("warning: " + w.Error()))

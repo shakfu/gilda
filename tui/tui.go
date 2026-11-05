@@ -42,6 +42,7 @@ func Run(ctx context.Context, a *app.App, opts Options) error {
 	// life ends with the REPL, so a run still sending events stops instead of blocking forever.
 	life, stop := context.WithCancel(ctx)
 	m := newModel(life, a, opts)
+	m.herdr = newHerdr(os.Getenv)
 	popts := []tea.ProgramOption{tea.WithContext(life)}
 	if !opts.Color {
 		popts = append(popts, tea.WithColorProfile(colorprofile.Ascii))
@@ -49,6 +50,10 @@ func Run(ctx context.Context, a *app.App, opts Options) error {
 	_, err := tea.NewProgram(m, popts...).Run()
 	stop()
 	m.tasks.wait()
+	// A signal, such as a Herdr restart, keeps the pane's resume command; quitting clears it.
+	if ctx.Err() == nil {
+		m.herdr.release()
+	}
 	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
 		err = nil
 	}
@@ -143,6 +148,11 @@ type model struct {
 	// Tab cycles through the commands that start with tabSeed; tabLast is the one it set last.
 	tabIdx           int
 	tabSeed, tabLast string
+
+	herdr *herdr // nil outside a Herdr pane
+	// herdrID and herdrResume are the session reported to Herdr, read between runs.
+	herdrID     string
+	herdrResume []string
 }
 
 func newModel(ctx context.Context, a *app.App, opts Options) *model {
@@ -267,6 +277,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for _, l := range TrustLines(m.st, dir, files) {
 				m.out(l)
 			}
+			m.herdrReport("blocked", "trust this directory?")
+		} else {
+			m.herdrReport("idle", "")
 		}
 		return m, tea.Sequence(m.flush(), m.next())
 
@@ -294,6 +307,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.approval = &msg
 			m.phase = "waiting for approval"
+			m.herdrReport("blocked", "allow "+msg.label+"?")
 			for _, l := range ApprovalLines(m.st, msg.label, msg.preview, m.width) {
 				m.out(l)
 			}
@@ -304,6 +318,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case doneMsg:
 		ping := m.notify("done")
 		m.finish(msg)
+		m.herdrReport("idle", "")
 		return m, tea.Sequence(m.flush(), ping, m.next())
 
 	case spinner.TickMsg:
@@ -421,6 +436,7 @@ func (m *model) next() tea.Cmd {
 }
 
 func (m *model) start(text string) tea.Cmd {
+	m.herdrReport("working", "")
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.running, m.stopped, m.started, m.phase = cancel, true, false, time.Now(), "waiting"
 	m.reply = ""
@@ -448,6 +464,22 @@ func (m *model) start(text string) tea.Cmd {
 		close(ch)
 	}()
 	return tea.Batch(listen(ch), m.spin.Tick)
+}
+
+// herdrReport sends state to Herdr. The session is read only while no run is in flight, since a
+// run's goroutine may change it, and the copy is reused during one.
+func (m *model) herdrReport(state, message string) {
+	if m.herdr == nil {
+		return
+	}
+	if !m.running {
+		m.herdrID, m.herdrResume = "", nil
+		if m.app.SessionSaved() {
+			m.herdrID = m.app.Agent.SessionID
+			m.herdrResume = m.herdr.resumeArgv(m.app.Root(), m.app.Mode(), m.herdrID)
+		}
+	}
+	m.herdr.report(state, message, m.herdrID, m.herdrResume)
 }
 
 // notifyAfter is how long a turn runs before its end or an approval it waits on gets attention.
@@ -500,6 +532,7 @@ func (m *model) approvalKey(msg tea.KeyPressMsg) tea.Cmd {
 	q := m.approval
 	answer := func(ok bool) {
 		m.approval, m.phase = nil, q.label
+		m.herdrReport("working", "")
 		q.reply <- ok
 	}
 	switch msg.String() {
@@ -584,6 +617,7 @@ func (m *model) trustKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.out(m.st.Warn.Render("warning: " + err.Error()))
 	}
 	m.trust, m.busy = "", ""
+	m.herdrReport("idle", "")
 	if ok {
 		m.out(m.st.Dim.Render("trusted"))
 	} else {
