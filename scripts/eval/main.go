@@ -6,13 +6,22 @@
 //
 // A task is a directory:
 //
-//	task.toml   prompt, check, and optional max_turns and tools
+//	task.toml   prompt, check, and optional setup, max_turns, context and tools
 //	repo/       the files the run starts from, copied to a scratch directory
 //	check/      files copied in only for the check, such as hidden tests
 //	mock.json   with -mock, a scripted conversation that replaces the provider
 //
-// The check is a shell command run in the scratch directory once gilda exits; exit 0 is a pass.
+// setup is a shell command run in the scratch directory before gilda starts, such as one that
+// commits the files to a git repository and then leaves a change uncommitted. context passes
+// --context, so a task can reach elision without filling a large window. The check is a shell
+// command run in the scratch directory once gilda exits; exit 0 is a pass.
 // GILDA_ANSWER names a file holding the run's final text, for tasks that ask a question.
+//
+// The report gives, per task, the pass rate; "checked", the runs that ran bash after their last
+// file change out of those that changed a file; the runs that elided old tool results; and
+// failed tool calls, tokens, cost and time per run. Then it gives the tool mix, with bash split
+// by the programs it ran, as scripts/tally does. A bash call after an edit counts as a check
+// whatever it ran, so "checked" is an upper bound.
 //
 // Runs use --permissions all, so bash runs unconfined. Run untrusted tasks in a container.
 package main
@@ -35,6 +44,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/shakfu/gilda/scripts/internal/shell"
 )
 
 type task struct {
@@ -42,7 +53,9 @@ type task struct {
 	Dir      string
 	Prompt   string   `toml:"prompt"`
 	Check    string   `toml:"check"`
+	Setup    string   `toml:"setup"`
 	MaxTurns int      `toml:"max_turns"`
+	Context  int      `toml:"context"`
 	Tools    []string `toml:"tools"`
 }
 
@@ -67,6 +80,16 @@ type outcome struct {
 	Seconds  float64 `json:"seconds"`
 	Model    string  `json:"model"`
 	CheckOut string  `json:"check_output,omitempty"`
+	// Tools counts tool calls by scripts/internal/shell.ToolName, the subagent's included.
+	Tools  map[string]int `json:"tools,omitempty"`
+	Failed int            `json:"failed_calls"`
+	// Edited is set when the run changed a file through a tool, and Checked when a bash call
+	// followed its last change, as a build or test would. The subagent is not counted: it
+	// cannot edit.
+	Edited  bool `json:"edited"`
+	Checked bool `json:"checked"`
+	// Elided counts the times old tool results were elided.
+	Elided int `json:"elided"`
 	// recorded is set when gilda wrote a result record, so the outcome is its own.
 	recorded bool
 }
@@ -187,8 +210,14 @@ func runOnce(ctx context.Context, t task, i int, o options) (outcome, error) {
 	if t.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprint(t.MaxTurns))
 	}
+	if t.Context > 0 {
+		args = append(args, "--context", fmt.Sprint(t.Context))
+	}
 	if len(t.Tools) > 0 {
 		args = append(args, "--tools", strings.Join(t.Tools, ","))
+	}
+	if err := setup(ctx, t, work, home); err != nil {
+		return outcome{}, err
 	}
 	rctx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
@@ -242,6 +271,9 @@ func (r *outcome) read(jsonl string) string {
 	for sc.Scan() {
 		var rec struct {
 			Type    string `json:"type"`
+			Name    string `json:"name"`
+			Label   string `json:"label"`
+			OK      bool   `json:"ok"`
 			Outcome string `json:"outcome"`
 			Error   string `json:"error"`
 			Text    string `json:"text"`
@@ -261,6 +293,10 @@ func (r *outcome) read(jsonl string) string {
 			cost = *rec.Usage.Cost
 		}
 		switch rec.Type {
+		case "tool_result":
+			r.tool(rec.Name, rec.Label, rec.OK)
+		case "elided":
+			r.Elided++
 		case "start":
 			partial.Model = rec.Model
 		case "turn", "task":
@@ -282,6 +318,43 @@ func (r *outcome) read(jsonl string) string {
 	return text
 }
 
+// setup runs the task's setup command in work. A failure is the task's fault, not the run's,
+// so it stops the suite.
+func setup(ctx context.Context, t task, work, home string) error {
+	if t.Setup == "" {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", t.Setup)
+	cmd.Dir, cmd.Env = work, env(home)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("setup: %v\n%s", err, out)
+	}
+	return nil
+}
+
+// changers are the tools that change files.
+var changers = map[string]bool{"write": true, "edit": true, "apply_patch": true}
+
+// tool counts one tool_result record.
+func (r *outcome) tool(name, label string, ok bool) {
+	if r.Tools == nil {
+		r.Tools = map[string]int{}
+	}
+	r.Tools[shell.ToolName(name, label)]++
+	if !ok {
+		r.Failed++
+	}
+	if strings.HasPrefix(label, "[task] ") {
+		return
+	}
+	switch {
+	case changers[name] && ok:
+		r.Edited, r.Checked = true, false
+	case name == "bash" && r.Edited:
+		r.Checked = true
+	}
+}
+
 // env is the process environment without GILDA_ variables, which would change what a run does,
 // and with XDG directories under home, so runs share no state, trust or settings.
 func env(home string) []string {
@@ -297,15 +370,17 @@ func env(home string) []string {
 		"XDG_CACHE_HOME="+filepath.Join(home, "cache"))
 }
 
+// report prints a row per task, then the tool mix of all runs.
 func report(w io.Writer, results []outcome) {
 	type agg struct {
-		runs, passes, turns int
-		in, out             int64
-		cost, secs          float64
+		runs, passes, turns, failed, edited, checked, elided int
+		in, out                                              int64
+		cost, secs                                           float64
 	}
 	byTask := map[string]*agg{}
 	var names []string
 	total := &agg{}
+	tools := map[string]int{}
 	for _, r := range results {
 		a := byTask[r.Task]
 		if a == nil {
@@ -318,26 +393,59 @@ func report(w io.Writer, results []outcome) {
 			if r.Pass {
 				x.passes++
 			}
+			if r.Edited {
+				x.edited++
+				if r.Checked {
+					x.checked++
+				}
+			}
 			x.turns += r.Turns
+			x.failed += r.Failed
+			if r.Elided > 0 {
+				x.elided++
+			}
 			x.in += r.Input
 			x.out += r.Output
 			x.cost += r.Cost
 			x.secs += r.Seconds
 		}
+		for t, n := range r.Tools {
+			tools[t] += n
+		}
 	}
 	sort.Strings(names)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "task\tpass\tturns\tin\tout\tcost\tseconds\t")
+	fmt.Fprintln(tw, "task\tpass\tchecked\telided\tturns\tfailed calls\tin\tout\tcost\tseconds\t")
 	row := func(name string, a *agg) {
 		n := float64(a.runs)
-		fmt.Fprintf(tw, "%s\t%d/%d\t%.1f\t%.0f\t%.0f\t$%.4f\t%.0f\t\n", name, a.passes, a.runs,
-			float64(a.turns)/n, float64(a.in)/n, float64(a.out)/n, a.cost, a.secs/n)
+		fmt.Fprintf(tw, "%s\t%d/%d\t%d/%d\t%d\t%.1f\t%.1f\t%.0f\t%.0f\t$%.4f\t%.0f\t\n", name, a.passes, a.runs,
+			a.checked, a.edited, a.elided, float64(a.turns)/n, float64(a.failed)/n, float64(a.in)/n, float64(a.out)/n, a.cost, a.secs/n)
 	}
 	for _, name := range names {
 		row(name, byTask[name])
 	}
 	if len(names) > 1 {
 		row("all", total)
+	}
+	tw.Flush()
+	if len(tools) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(tools))
+	for t := range tools {
+		keys = append(keys, t)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if tools[keys[i]] != tools[keys[j]] {
+			return tools[keys[i]] > tools[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	fmt.Fprintln(w)
+	tw = tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
+	fmt.Fprintln(tw, "tool\tcalls\tper run\t")
+	for _, t := range keys {
+		fmt.Fprintf(tw, "%s\t%d\t%.1f\t\n", t, tools[t], float64(tools[t])/float64(len(results)))
 	}
 	tw.Flush()
 }

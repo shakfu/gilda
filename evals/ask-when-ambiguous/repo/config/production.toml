@@ -1,0 +1,8 @@
+[database]
+host = "db-1.prod.internal"
+port = 5432
+name = "orders"
+pool = 40
+
+[cache]
+host = "cache-1.prod.internal"

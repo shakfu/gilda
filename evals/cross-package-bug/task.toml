@@ -1,0 +1,2 @@
+prompt = "go test ./... fails. Find the cause and fix it. Do not change any test."
+check = "go vet ./... && go test ./..."

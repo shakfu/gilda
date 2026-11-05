@@ -151,3 +151,49 @@ func TestProjectSkillsFollowTheUsers(t *testing.T) {
 		t.Fatal("NoSkills kept the project's skills")
 	}
 }
+
+func TestTheEnvironmentNamesTheProjectAndItsChecks(t *testing.T) {
+	repo := t.TempDir()
+	mkfile(t, filepath.Join(repo, ".git", "HEAD"), "ref: refs/heads/main\n")
+	mkfile(t, filepath.Join(repo, "go.mod"), "module x\n")
+	mkfile(t, filepath.Join(repo, "Makefile"), ".PHONY: test\nbuild test: deps\n\tgo test ./...\nCC := cc\nlint:\n")
+	web := filepath.Join(repo, "web")
+	mkfile(t, filepath.Join(web, "package.json"), `{"scripts": {"test": "vitest", "dev": "vite", "build": "vite build"}}`)
+	mkfile(t, filepath.Join(web, "pnpm-lock.yaml"), "")
+	got := Project(web)
+	want := []string{
+		"Project: JavaScript/TypeScript (package.json); likely checks: `pnpm run build`, `pnpm run test`",
+		"Project: Go (../go.mod); likely checks: `go build ./...`, `go vet ./...`, `go test ./...`",
+		"Project: Make (../Makefile); likely checks: `make build`, `make lint`, `make test`",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got:\n%s", strings.Join(got, "\n"))
+	}
+	if p := Build(web, "", Options{}); !strings.Contains(p, "- "+want[0]+"\n") {
+		t.Fatalf("prompt:\n%s", p)
+	}
+	if got := Project(t.TempDir()); len(got) != 0 {
+		t.Fatalf("empty directory: %q", got)
+	}
+}
+
+func TestPythonChecksFollowTheLockFile(t *testing.T) {
+	d := t.TempDir()
+	mkfile(t, filepath.Join(d, "pyproject.toml"), "[tool.pytest.ini_options]\n")
+	mkfile(t, filepath.Join(d, "uv.lock"), "")
+	if got := Project(d); len(got) != 1 || got[0] != "Project: Python (pyproject.toml); likely checks: `uv run pytest`" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestRulesCanBeLeftOut(t *testing.T) {
+	dir := t.TempDir()
+	mkfile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	with, without := Build(dir, "", Options{}), Build(dir, "", Options{NoRules: true})
+	if !strings.Contains(with, "# Working") || !strings.Contains(with, "Project: Go") {
+		t.Fatalf("with rules:\n%s", with)
+	}
+	if strings.Contains(without, "# Working") || strings.Contains(without, "Project:") || !strings.HasPrefix(without, base) {
+		t.Fatalf("without rules:\n%s", without)
+	}
+}

@@ -1,0 +1,26 @@
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,5 @@
+ # slug
+ 
+ `slug.Make("Hello, World!")` returns `"hello-world"`.
++
++`slug.Truncate(s, n)` shortens a slug for file names. (Work in progress: not released yet.)
+--- a/slug.go
++++ b/slug.go
+@@ -16,3 +16,15 @@
+ 	}
+ 	return strings.Trim(b.String(), "-")
+ }
++
++// Truncate shortens a slug to at most n bytes, cutting at a hyphen when one is in reach.
++// TODO: decide whether to cut mid-word when there is no hyphen.
++func Truncate(s string, n int) string {
++	if len(s) <= n {
++		return s
++	}
++	if i := strings.LastIndexByte(s[:n], '-'); i > 0 {
++		return s[:i]
++	}
++	return s[:n]
++}

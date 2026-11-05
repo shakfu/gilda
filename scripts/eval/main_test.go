@@ -35,6 +35,9 @@ func TestEachCheckFailsOnTheStartingRepo(t *testing.T) {
 		if err := copyDir(filepath.Join(tk.Dir, "repo"), work); err != nil {
 			t.Fatal(err)
 		}
+		if err := setup(context.Background(), tk, work, t.TempDir()); err != nil {
+			t.Fatalf("%s: %v", tk.Name, err)
+		}
 		_ = copyDir(filepath.Join(tk.Dir, "check"), work)
 		answer := filepath.Join(t.TempDir(), "answer.txt")
 		os.WriteFile(answer, nil, 0o644)
@@ -131,5 +134,36 @@ func TestASetupErrorStopsTheSuite(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Fatalf("%d runs after a setup error", len(results))
+	}
+}
+
+// A run is checked when bash runs after its last change; a subagent's calls count in the mix only.
+func TestARunIsCheckedByBashAfterItsLastChange(t *testing.T) {
+	out := `{"type":"tool_result","name":"read","label":"read a.go","ok":true}
+{"type":"tool_result","name":"edit","label":"edit a.go","ok":true}
+{"type":"tool_result","name":"bash","label":"$ go test ./... | tail","ok":false}
+{"type":"tool_result","name":"edit","label":"edit a.go","ok":true}
+{"type":"tool_result","name":"bash","label":"[task] $ rg x","ok":true}
+{"type":"tool_result","name":"edit","label":"edit b.go","ok":false}`
+	var r outcome
+	r.read(out)
+	want := map[string]int{"read": 1, "edit": 3, "bash go+tail": 1, "task>bash rg": 1}
+	if !r.Edited || r.Checked || r.Failed != 2 || len(r.Tools) != len(want) {
+		t.Fatalf("%+v", r)
+	}
+	for k, n := range want {
+		if r.Tools[k] != n {
+			t.Fatalf("%s: %d, want %d", k, r.Tools[k], n)
+		}
+	}
+	r.read(`{"type":"tool_result","name":"bash","label":"$ go build","ok":true}`)
+	if !r.Checked {
+		t.Fatal("bash after the last change did not count")
+	}
+	var b strings.Builder
+	r.Task, r.Run = "t", 1
+	report(&b, []outcome{r})
+	if !strings.Contains(b.String(), "1/1") || !strings.Contains(b.String(), "task>bash rg") {
+		t.Fatalf("report:\n%s", b.String())
 	}
 }

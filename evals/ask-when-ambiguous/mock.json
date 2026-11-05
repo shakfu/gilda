@@ -1,0 +1,4 @@
+[
+  {"calls": [{"name": "read", "arguments": {"path": "config/production.toml"}}, {"name": "read", "arguments": {"path": "README.md"}}], "usage": {"input_tokens": 100, "output_tokens": 10}},
+  {"text": "The production database is db-1.prod.internal, and nothing in the repository names a new server. What is the new server's host name (and port, if it changes)?", "usage": {"input_tokens": 100, "output_tokens": 10}}
+]

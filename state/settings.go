@@ -91,6 +91,8 @@ type Tools struct {
 type Prompt struct {
 	AgentsMD *bool `toml:"agents_md"`
 	Skills   *bool `toml:"skills"`
+	// Rules is the working rules and the project lines, there to A/B them with scripts/eval.
+	Rules *bool `toml:"rules"`
 }
 
 // Prices controls OpenRouter's price list, which also gives context windows. Nil means on.

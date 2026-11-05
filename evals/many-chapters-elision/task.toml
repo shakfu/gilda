@@ -1,0 +1,5 @@
+prompt = "Each file in chapters/ has a line 'Owner: NAME' and a line 'Status: STATUS'. List the owners of the chapters whose status is draft, in chapter order. Answer with only the names, one per line."
+check = '''test "$(grep -oE 'Okonkwo|Varga|Lindqvist|Takahashi|Moreau|Castellanos|Novak|Haddad|Kowalczyk|Abernathy|Iwu|Petrenko|Salgado|Thorsen|Bhattacharya|Delacroix' "$GILDA_ANSWER" | tr '\n' ' ')" = "Lindqvist Moreau Kowalczyk Petrenko Bhattacharya "'''
+tools = ["read"]
+# A small window, so reading every chapter passes 70% and old results are elided.
+context = 50000

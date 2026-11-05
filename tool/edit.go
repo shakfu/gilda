@@ -84,7 +84,11 @@ func (b boundEdit) Run(context.Context, json.RawMessage) (Result, error) {
 	if b.n > 1 {
 		summary = fmt.Sprintf("%d replacements", b.n)
 	}
-	return Result{Output: fmt.Sprintf("edited %s: %s", b.target.name, summary), Summary: summary}, nil
+	out := fmt.Sprintf("edited %s: %s", b.target.name, summary)
+	if b.note != "" {
+		out += " (" + b.note + ")"
+	}
+	return Result{Output: out, Summary: summary}, nil
 }
 
 func (b boundEdit) Preview(json.RawMessage) (string, error) {
@@ -96,6 +100,7 @@ type change struct {
 	target        target
 	before, after string
 	n             int
+	note          string // how a loose match differed from old_string, or ""
 }
 
 // apply works out an edit without writing it. It refuses an ambiguous match: an edit that
@@ -145,7 +150,11 @@ func (e Edit) apply(raw json.RawMessage) (change, error) {
 	n := strings.Count(text, old)
 	switch {
 	case n == 0:
-		return change{}, fmt.Errorf("old_string not found in %s", a.Path)
+		m, err := looseMatch(text, a.OldString, a.NewString, a.Path)
+		if err != nil {
+			return change{}, err
+		}
+		return change{target: t, before: text, after: text[:m.start] + m.repl + text[m.end:], n: 1, note: m.note}, nil
 	case n > 1 && !a.ReplaceAll:
 		return change{}, fmt.Errorf("old_string occurs %d times in %s; add context or set replace_all", n, a.Path)
 	}

@@ -208,6 +208,7 @@ func New(opts Options) (*App, error) {
 	promptOpts := prompt.Options{
 		NoAgents: !state.Or(settings.Prompt.AgentsMD, true),
 		NoSkills: !state.Or(settings.Prompt.Skills, true),
+		NoRules:  !state.Or(settings.Prompt.Rules, true),
 	}
 	fetchPrices := state.Or(settings.Prices.Fetch, true)
 	if opts.CacheDir == "" {

@@ -1,0 +1,263 @@
+[
+ {
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 3500,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/01.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 3800,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/02.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 6300,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/03.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 8800,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/04.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 11300,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/05.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 13800,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/06.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 16300,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/07.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 18800,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/08.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 21300,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/09.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 23800,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/10.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 26300,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/11.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 28800,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/12.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 31300,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/13.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 33800,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/14.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 36300,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/15.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 38800,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "",
+  "calls": [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "chapters/16.md"
+    }
+   }
+  ],
+  "usage": {
+   "input_tokens": 41300,
+   "output_tokens": 20
+  }
+ },
+ {
+  "text": "Lindqvist\nMoreau\nKowalczyk\nPetrenko\nBhattacharya",
+  "usage": {
+   "input_tokens": 43800,
+   "output_tokens": 30
+  }
+ }
+]

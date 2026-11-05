@@ -119,7 +119,7 @@ Start llama-server with `--jinja` so tool calls work.
 
 - **Skills:** `skills/<name>/SKILL.md` in the config directory, then `.agents/skills/<name>/SKILL.md` at the repository root, by the [Agent Skills](https://agentskills.io/specification) convention. The prompt lists each skill's path and frontmatter; the model reads the file when a task matches. The repository directory is named after `AGENTS.md`; other agents may look elsewhere, such as `.claude/skills`.
 
-- **Environment:** the system prompt states the working directory, platform, shell, the date and the git branch, both as at session start. The branch is read from `.git/HEAD`, so no `git` process runs.
+- **Environment:** the system prompt states the working directory, platform, shell, the date and the git branch, both as at session start. The branch is read from `.git/HEAD`, so no `git` process runs. It also names the projects in the working directory and at the repository root, from marker files such as `go.mod`, `package.json` or a `Makefile`, with the commands likely to build and test them.
 
 - **Sessions:** each conversation is saved after every prompt, to `$XDG_STATE_HOME/gilda/sessions/ID.json` at mode 0600. `-c` resumes the newest session for the working directory, and `--resume ID` a given one; a unique prefix of the id is enough. `--sessions` lists them. The REPL prints the id when it exits, and `--json` puts it in the `result` record. A resumed session keeps the provider and model unless `-P` or `-m` names others. Reasoning payloads are saved too, so a resumed turn replays them to the same model. A session saved in another directory is refused, since its history names files there. When two instances resume one session, the second to save continues under a new id and says so, so neither overwrites the other. The newest 100 sessions are kept. A session holds whatever the tools printed, secrets included; `save = false` under `[session]` in `settings.toml` turns saving off.
 
@@ -257,6 +257,7 @@ diff_max_bytes = 1048576 # bytes of the old file a write preview reads
 [prompt]
 agents_md = true       # AGENTS.md files in the system prompt
 skills = true          # skills' frontmatter in the system prompt
+rules = true           # working rules and project lines in the system prompt
 
 [prices]
 fetch = true           # OpenRouter's price list, fetched once a day
@@ -273,7 +274,7 @@ notify = "bell"        # after a turn of 30 s or more: bell, osc9 or off
 | `max_tokens`, `max_turns` | tokens per prompt |
 | `stream_retries` | tokens: each resend sends the whole request again, mostly as cache reads |
 | `output_cap`, `read_lines`, `read_line_bytes` | tokens: each result stays in the history and is sent again with every later request |
-| `agents_md`, `skills` | tokens on every request |
+| `agents_md`, `skills`, `rules` | tokens on every request |
 | `context` | when gilda stops a conversation as full, at 95% |
 | `bash_timeout`, `bash_max_timeout` | wall-clock time |
 | `diff_max_bytes` | local I/O when approving a write |

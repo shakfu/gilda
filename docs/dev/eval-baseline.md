@@ -1,5 +1,18 @@
 # Eval baseline: local models
 
+## Cloud baseline: not yet run
+
+As of 2026-11-05 the suite has 13 tasks (5 added: see `evals/README.md`), and the report adds
+"checked" (bash after the last edit), "elided" and the tool mix. Run:
+
+```sh
+scripts/baseline.sh            # each provider whose key is set; N=3, rules on and off
+```
+
+Record here, per model and arm: the task table, the tool-mix table, and the date and commit.
+The rules arm answers whether the working rules in `prompt/prompt.go` raise "checked" and the
+pass rate. Results below predate the new tasks and the rules.
+
 Run 2026-10-09 with `scripts/eval -n 3` over the 8 tasks in `evals/`. No cloud baseline exists yet; `TODO.md` step 2 still needs one.
 
 ## Setup

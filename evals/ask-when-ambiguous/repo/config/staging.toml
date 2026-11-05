@@ -1,0 +1,8 @@
+[database]
+host = "db-1.staging.internal"
+port = 5432
+name = "orders"
+pool = 10
+
+[cache]
+host = "cache-1.staging.internal"

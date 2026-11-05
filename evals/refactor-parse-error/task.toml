@@ -1,0 +1,7 @@
+prompt = "config.Parse panics on bad input. Change it to return (Config, error) instead, with the line number in the error, and update every caller and test. The serve command should print the error to stderr and exit with status 1."
+check = '''
+! grep -n 'panic(' config/config.go &&
+go vet ./... && go test ./... &&
+test "$(go run ./cmd/serve port=81 name=x dir=d)" = "x on :81 serving d" &&
+! go run ./cmd/serve port=nope >/dev/null 2>err.txt && grep -q 'line 1' err.txt
+'''

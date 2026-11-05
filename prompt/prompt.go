@@ -17,6 +17,18 @@ import (
 
 const base = `You are gilda, a coding agent. Use the tools to inspect and change files. Be terse. State what you did; do not narrate what you are about to do.`
 
+// rules follow base unless Options.NoRules is set.
+const rules = `# Working
+
+- Read the code you will change before changing it, and its callers when a signature changes. Match the existing style.
+- Use a dedicated tool rather than bash when one does the job.
+- Make tool calls that do not depend on each other in the same response.
+- Do not revert or overwrite changes you did not make. In a git repository, check git status before editing.
+- Make the change asked for and no more: no unrequested refactors, files or dependencies.
+- After changing code, run the project's build, tests or linter, whichever apply, and fix what fails. Never claim a check passed without running it; if you cannot run it, say so.
+- If the request is ambiguous in a way that changes the result, ask rather than guess.
+- End with what changed, what you checked, and anything left undone.`
+
 // AgentsFile follows the cross-tool convention at https://agents.md.
 const AgentsFile = "AGENTS.md"
 
@@ -32,6 +44,7 @@ const maxFrontmatter = 4096
 type Options struct {
 	NoAgents bool // AGENTS.md files
 	NoSkills bool // skills' frontmatter, the user's and the repository's
+	NoRules  bool // the working rules and the project lines, for A/B evals
 	// Today is the date the prompt states, as 2006-01-02; empty means the current one.
 	Today string
 }
@@ -45,6 +58,9 @@ const ProjectSkills = ".agents/skills"
 func Build(dir, configDir string, o Options) string {
 	var b strings.Builder
 	b.WriteString(base)
+	if !o.NoRules {
+		b.WriteString("\n\n" + rules)
+	}
 	b.WriteString("\n\n# Environment\n\n")
 	fmt.Fprintf(&b, "- Working directory: %s\n", dir)
 	fmt.Fprintf(&b, "- Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
@@ -57,6 +73,11 @@ func Build(dir, configDir string, o Options) string {
 	fmt.Fprintf(&b, "- Date at session start: %s\n", today)
 	if branch := Branch(dir); branch != "" {
 		fmt.Fprintf(&b, "- Git branch at session start: %s\n", branch)
+	}
+	if !o.NoRules {
+		for _, line := range Project(dir) {
+			fmt.Fprintf(&b, "- %s\n", line)
+		}
 	}
 
 	if !o.NoAgents {
