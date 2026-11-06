@@ -47,10 +47,14 @@ type project struct {
 }
 
 func projects(d string) []project {
-	has := func(name string) bool {
-		_, err := os.Stat(filepath.Join(d, name))
-		return err == nil
+	// Match directory entries by exact name: on a case-insensitive filesystem (macOS default),
+	// os.Stat("makefile") finds Makefile and the prompt would name the wrong file.
+	entries, _ := os.ReadDir(d)
+	names := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		names[e.Name()] = true
 	}
+	has := func(name string) bool { return names[name] }
 	var out []project
 	add := func(kind, marker string, checks ...string) {
 		out = append(out, project{kind, marker, checks})
