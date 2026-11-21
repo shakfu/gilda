@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
+	"github.com/shakfu/gilda/acp"
 	"github.com/shakfu/gilda/app"
 	"github.com/shakfu/gilda/llm"
 	"github.com/shakfu/gilda/permission"
@@ -43,6 +44,7 @@ type flags struct {
 	json     bool
 	noColor  bool
 	sessions bool
+	acp      bool
 }
 
 // exitError carries an exit status out of cobra's RunE.
@@ -76,6 +78,11 @@ func main() {
 			} else if !f.json {
 				fmt.Fprintln(os.Stderr, "gilda: warning: --api-key shows the key in the process "+
 					"list and shell history; set GILDA_API_KEY instead")
+			}
+			if f.acp {
+				if err := checkACP(cmd.Flags(), len(args) > 0); err != nil {
+					return err
+				}
 			}
 			if f.json && !f.headless {
 				return errors.New("--json needs -p")
@@ -128,6 +135,7 @@ func main() {
 	fl.StringVar(&f.Resume, "resume", "", "resume the session with this `ID`, or a unique prefix of it")
 	fl.BoolVar(&f.sessions, "sessions", false, "list the sessions saved for the working directory and exit")
 	fl.BoolVar(&f.Refresh, "refresh-models", false, "refetch the price list, ignoring the cache")
+	fl.BoolVar(&f.acp, "acp", false, "serve the Agent Client Protocol on stdin and stdout, for an editor")
 	fl.SortFlags = false
 	cmd.Flags().BoolP("help", "h", false, "print this help")
 	cmd.Flags().BoolP("version", "v", false, "print the version")
@@ -184,6 +192,10 @@ func run(f flags) int {
 		}
 		defer logFile.Close()
 		llm.SetLog(logFile)
+	}
+
+	if f.acp {
+		return serveACP(f.Options, f.Root)
 	}
 
 	a, err := app.New(f.Options)
@@ -247,6 +259,52 @@ func helpWidth() int {
 		return w
 	}
 	return 80
+}
+
+// checkACP refuses flags that --acp replaces: the client sends the prompts and resumes
+// sessions with session/load.
+func checkACP(fs *pflag.FlagSet, args bool) error {
+	if args || fs.Changed("prompt") {
+		return errors.New("--acp takes its prompts from the client, not from -p or arguments")
+	}
+	for _, name := range []string{"json", "continue", "resume", "sessions"} {
+		if fs.Changed(name) {
+			return fmt.Errorf("--acp and --%s are exclusive", name)
+		}
+	}
+	return nil
+}
+
+// serveACP answers an ACP client on stdin and stdout until stdin ends. Notes go to stderr.
+// Each session cwd must be within bound, or the current directory when bound is empty.
+func serveACP(o app.Options, bound string) int {
+	if bound == "" {
+		var err error
+		if bound, err = os.Getwd(); err != nil {
+			fmt.Fprintln(os.Stderr, "gilda:", err)
+			return 1
+		}
+	}
+	// Fail at start on a bad provider, model or flag, rather than at each session/new.
+	a, err := app.New(o)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gilda:", err)
+		return 1
+	}
+	a.Close()
+	// A client gone mid-turn would otherwise kill gilda on its next write, unsaved and with its
+	// jobs left running; ignored, the write fails and Serve stops.
+	signal.Ignore(syscall.SIGPIPE)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGHUP, syscall.SIGTERM)
+	defer stop()
+	// The first signal starts the shutdown; a second kills, as a client that stops reading
+	// blocks the shutdown on a write.
+	context.AfterFunc(ctx, stop)
+	if err := acp.Serve(ctx, os.Stdin, os.Stdout, acp.Options{App: o, Version: version, Bound: bound, Log: os.Stderr}); err != nil {
+		fmt.Fprintln(os.Stderr, "gilda:", err)
+		return 1
+	}
+	return 0
 }
 
 func checkEffort(e string) error {

@@ -287,7 +287,7 @@ func TestPickerKeys(t *testing.T) {
 func TestAllowedCallsSkipThePreview(t *testing.T) {
 	m := testModel(t)
 	outside := permission.Reason{Kind: permission.Outside, Text: "edit outside /r"}
-	m.always[allowance{tool: "edit", kind: permission.Outside}] = true
+	m.always[permission.Allowance{Tool: "edit", Kind: permission.Outside}] = true
 	previews := 0
 	ask := askVia(make(chan tea.Msg), func(tool.Tool, llm.ToolCall) string { previews++; return "diff" }, m.allowed)
 	ctx, cancel := context.WithCancel(context.Background())

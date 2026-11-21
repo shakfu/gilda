@@ -91,6 +91,42 @@ func (r Reason) String() string { return r.Text }
 // one would lift a built-in rule.
 func (r Reason) Lasting() bool { return r.Kind != Secret && r.Kind != Protected }
 
+// Allowance is what an "always" answer remembers: a tool, the Kind of its reason and, for Host,
+// one host.
+type Allowance struct {
+	Tool string
+	Kind Kind
+	Host string
+}
+
+// Allowances lists what must be remembered for later calls of tool with this reason to be
+// covered: one per unlisted host. It is nil when the reason is not Lasting.
+func (r Reason) Allowances(tool string) []Allowance {
+	if !r.Lasting() {
+		return nil
+	}
+	if r.Kind != Host {
+		return []Allowance{{Tool: tool, Kind: r.Kind}}
+	}
+	out := make([]Allowance, 0, len(r.Hosts))
+	for _, h := range r.Hosts {
+		out = append(out, Allowance{tool, r.Kind, h})
+	}
+	return out
+}
+
+// Scope names the calls an allowance for tool covers, such as "edit outside the working
+// directory".
+func (r Reason) Scope(tool string) string {
+	switch r.Kind {
+	case Outside:
+		return tool + " outside the working directory"
+	case Host:
+		return tool + " to " + strings.Join(r.Hosts, ", ")
+	}
+	return tool
+}
+
 // Approver returns the approval function for mode, with root as the working directory. Each
 // Rules is a layer, such as the user's settings and an embedding app's own, added to the
 // built-in layer; see Layers. A call that would ask is refused when ask is nil, as in a run

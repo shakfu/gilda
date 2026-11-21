@@ -312,6 +312,27 @@ A turn that has run for 30 seconds rings the terminal bell when it ends or waits
 | `/cost` | session tokens and cost |
 | `/help`, `/exit`, `/quit` | |
 
+### Editors: `--acp`
+
+`gilda --acp` serves the [Agent Client Protocol](https://agentclientprotocol.com/protocol/), version 1, on stdin and stdout. An editor such as Zed, or `minosb -agent acp`, can then drive it. stdout carries only protocol messages; notes and warnings go to stderr. Provider, model, `--permissions` and the other agent flags work as in the REPL. `-p`, prompt arguments, `--json`, `-c`, `--resume` and `--sessions` are refused: the client sends the prompts and resumes sessions.
+
+- `session/new` starts a conversation in the client's `cwd`, which must be absolute and within `-C DIR`, by default the directory gilda started in. Another `cwd` is refused with `-32602`; `-C /` allows any. Sessions can run side by side, one prompt at a time each. A prompt sent after `session/cancel` waits for the cancelled one to end.
+- `session/load` resumes a saved session by its exact id, with its cost so far. It replays the prompts, replies and tool calls as `session/update` before answering. A prompt for the session before that answer is refused with `-32002`.
+- Prompts take `text` and `resource_link` blocks; a link is sent to the model as its URI.
+- A turn streams `agent_message_chunk`, `agent_thought_chunk` for reasoning, `tool_call` and `tool_call_update` for each call (`pending`, `in_progress`, then `completed` or `failed`), and `usage_update` with the session's cost so far. With the context window unknown, no `usage_update` is sent, since its `size` is required. A response cut off mid-stream and sent again adds only text the client has not seen; one that differs follows a blank line.
+- A call the mode would ask about in the REPL is asked as `session/request_permission`, with the preview diff. The options are allow once, always allow where the REPL offers "a", and reject. Any other answer, a cancelled request included, refuses the call. "Always" lasts for the session.
+- An untrusted checkout uses ask mode, as `-p --json` does, since the trust question has no ACP form.
+- `session/cancel` stops the model request and any running tool, and the prompt ends with `stopReason` `cancelled`. Closing stdin, SIGINT, SIGTERM or SIGHUP cancels running prompts, saves them, and exits. A second signal exits at once, for a client that stopped reading.
+- `stopReason` is `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or `cancelled`. A provider error is a JSON-RPC error on the prompt. JSON-RPC batches, and lines that are not a JSON-RPC object, are refused with `-32600`.
+- The client's file system and terminal are never used. MCP servers in `session/new` are ignored, with a note on stderr: gilda has no MCP client.
+
+`mock/acp-conformance.json` passes minos's ACP conformance suite with every test running, under `ACP_STRICT=1` too. It answers two prompts the same way: it reads `.env`, which `auto` asks about, then runs `sleep 3`. `--context` gives the mock a window, so the usage test runs:
+
+```text
+cd minos && ACP_SLOW_PROMPT=wait ACP_PERMISSION_PROMPT=ask make acp-conformance \
+  ACP_AGENT='gilda --acp --permissions auto --context 200000 --mock /path/to/gilda/mock/acp-conformance.json'
+```
+
 ## Library
 
 The CLI is a thin layer over packages that can be used on their own:
@@ -328,6 +349,7 @@ The CLI is a thin layer over packages that can be used on their own:
 | `price` | cost and context windows from OpenRouter's list |
 | `provider`, `app`, `state` | the registry, session wiring and saved state the CLI uses |
 | `tui` | the REPL |
+| `acp` | the `--acp` server |
 
 ```go
 import (

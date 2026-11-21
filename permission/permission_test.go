@@ -378,3 +378,17 @@ func TestCaseInsensitiveFilesystem(t *testing.T) {
 		t.Error("write .GIT/hooks/pre-commit ran without asking")
 	}
 }
+
+// An "always" answer remembers one entry per unlisted host, and nothing for a secret.
+func TestAllowances(t *testing.T) {
+	if got := (Reason{Kind: Secret}).Allowances("read"); got != nil {
+		t.Errorf("secret: %v", got)
+	}
+	if got := (Reason{Kind: Outside}).Allowances("edit"); len(got) != 1 || got[0] != (Allowance{Tool: "edit", Kind: Outside}) {
+		t.Errorf("outside: %v", got)
+	}
+	got := (Reason{Kind: Host, Hosts: []string{"a.dev", "b.dev"}}).Allowances("fetch")
+	if len(got) != 2 || got[1].Host != "b.dev" {
+		t.Errorf("hosts: %v", got)
+	}
+}

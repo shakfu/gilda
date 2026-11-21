@@ -38,6 +38,8 @@ type SessionInfo struct {
 	// Used is the context the last request filled, so a resumed session elides or stops in
 	// time.
 	Used int64 `json:"context_used"`
+	// Cost is the USD the conversation has cost so far, across resumes; nil when unknown.
+	Cost *float64 `json:"cost,omitempty"`
 }
 
 type session struct {
@@ -89,7 +91,7 @@ func (a *App) Save() error {
 	}
 	s := session{SessionInfo: SessionInfo{
 		Version: sessionVersion, ID: ag.SessionID, Root: a.opts.Root, Provider: a.ProviderID, Model: ag.Model,
-		Created: a.created, Updated: now, Messages: len(ag.History), Used: ag.Used,
+		Created: a.created, Updated: now, Messages: len(ag.History), Used: ag.Used, Cost: a.SessionCost(),
 	}}
 	for _, m := range ag.History {
 		if s.Title == "" && m.Role == llm.User {

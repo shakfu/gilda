@@ -5,11 +5,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/shakfu/gilda/llm/llmtest"
 )
@@ -421,5 +425,295 @@ func TestSessionsResume(t *testing.T) {
 	}
 	if _, stderr, code := gildaIn(t, dir, answer, "--resume", "nope", "-p", "x"); code == 0 || !strings.Contains(stderr, "no saved session") {
 		t.Fatalf("unknown id: exit %d %q", code, stderr)
+	}
+}
+
+// --acp takes prompts and sessions from the client, so flags that give them are refused.
+func TestACPRefusesPromptFlags(t *testing.T) {
+	for _, args := range [][]string{{"--acp", "-p", "x"}, {"--acp", "hello"}, {"--acp", "--json"}, {"--acp", "-c"}} {
+		if _, stderr, code := gilda(t, "", args...); code != 2 || !strings.Contains(stderr, "--acp") {
+			t.Errorf("%v: exit %d stderr %q", args, code, stderr)
+		}
+	}
+}
+
+// gilda --acp answers a prompt over stdin and stdout, and stdout carries only JSON-RPC.
+func TestACPAnswersAPrompt(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "mock.json"), []byte(script), 0o644)
+	cmd := exec.Command(bin, "--acp", "--mock", "mock.json", "--permissions", "auto")
+	cmd.Dir = dir
+	cmd.Env = testEnv("XDG_STATE_HOME="+dir, "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir)
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	lines := bufio.NewScanner(stdout)
+	// next returns the response to id, failing on any line that is not JSON-RPC 2.0.
+	next := func(id int) map[string]any {
+		for lines.Scan() {
+			var m map[string]any
+			if err := json.Unmarshal(lines.Bytes(), &m); err != nil || m["jsonrpc"] != "2.0" {
+				t.Fatalf("stdout line is not JSON-RPC: %q", lines.Text())
+			}
+			if m["id"] == float64(id) {
+				return m
+			}
+		}
+		t.Fatalf("stdout ended before response %d; stderr %s", id, stderr.String())
+		return nil
+	}
+	send := func(id int, method string, params any) {
+		data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+		stdin.Write(append(data, '\n'))
+	}
+	send(1, "initialize", map[string]any{"protocolVersion": 1})
+	next(1)
+	send(2, "session/new", map[string]any{"cwd": dir, "mcpServers": []any{}})
+	session := next(2)["result"].(map[string]any)["sessionId"]
+	send(3, "session/prompt", map[string]any{"sessionId": session, "prompt": []map[string]string{{"type": "text", "text": "go"}}})
+	if r := next(3)["result"]; r == nil || r.(map[string]any)["stopReason"] != "end_turn" {
+		t.Fatalf("prompt: %v; stderr %s", r, stderr.String())
+	}
+	stdin.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("exit: %v; stderr %s", err, stderr.String())
+	}
+}
+
+// startACP runs gilda --acp in dir with args, and returns a client for it.
+func startACP(t *testing.T, dir string, args ...string) (*exec.Cmd, func(int, string, any) map[string]any, *bytes.Buffer) {
+	t.Helper()
+	os.WriteFile(filepath.Join(dir, "mock.json"), []byte(script), 0o644)
+	cmd := exec.Command(bin, append([]string{"--acp", "--mock", filepath.Join(dir, "mock.json"), "--permissions", "auto"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = testEnv("XDG_STATE_HOME="+dir, "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir)
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stdin.Close(); cmd.Wait() })
+	lines := bufio.NewScanner(stdout)
+	call := func(id int, method string, params any) map[string]any {
+		data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+		stdin.Write(append(data, '\n'))
+		for lines.Scan() {
+			var m map[string]any
+			if json.Unmarshal(lines.Bytes(), &m) == nil && m["id"] == float64(id) {
+				return m
+			}
+		}
+		t.Fatalf("stdout ended before response %d; stderr %s", id, stderr.String())
+		return nil
+	}
+	return cmd, call, stderr
+}
+
+// errCode is the error code of a response, or 0.
+func errCode(m map[string]any) float64 {
+	if e, ok := m["error"].(map[string]any); ok {
+		return e["code"].(float64)
+	}
+	return 0
+}
+
+// A session cwd must be within --root, by default the directory gilda started in.
+func TestACPBoundsTheSessionCwd(t *testing.T) {
+	dir, other := t.TempDir(), t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.Mkdir(sub, 0o755)
+	_, call, _ := startACP(t, dir)
+	call(1, "initialize", map[string]any{"protocolVersion": 1})
+	if m := call(2, "session/new", map[string]any{"cwd": other, "mcpServers": []any{}}); errCode(m) != -32602 {
+		t.Errorf("a cwd outside the start directory: %v", m)
+	}
+	if m := call(3, "session/new", map[string]any{"cwd": sub, "mcpServers": []any{}}); m["result"] == nil {
+		t.Errorf("a cwd inside the start directory: %v", m)
+	}
+	_, call, _ = startACP(t, dir, "--root", sub)
+	call(1, "initialize", map[string]any{"protocolVersion": 1})
+	if m := call(2, "session/new", map[string]any{"cwd": dir, "mcpServers": []any{}}); errCode(m) != -32602 {
+		t.Errorf("a cwd above --root: %v", m)
+	}
+	_, call, _ = startACP(t, dir, "--root", "/")
+	call(1, "initialize", map[string]any{"protocolVersion": 1})
+	if m := call(2, "session/new", map[string]any{"cwd": other, "mcpServers": []any{}}); m["result"] == nil {
+		t.Errorf("a cwd under --root /: %v", m)
+	}
+}
+
+// SIGINT ends gilda --acp cleanly, as SIGTERM does.
+func TestACPExitsCleanlyOnSIGINT(t *testing.T) {
+	cmd, call, stderr := startACP(t, t.TempDir())
+	call(1, "initialize", map[string]any{"protocolVersion": 1})
+	cmd.Process.Signal(os.Interrupt)
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("exit after SIGINT: %v; stderr %s", err, stderr.String())
+	}
+}
+
+// A client that stops reading mid-turn closes gilda's stdout. gilda must not die of SIGPIPE,
+// and must not run on for nobody: it saves the session and kills the turn's background job.
+func TestACPSavesAndCleansUpWhenTheClientDies(t *testing.T) {
+	dir := t.TempDir()
+	mock := `[{"text": "start", "calls": [{"name": "bash", "arguments": {"command": "(echo $$ > job.pid; exec sleep 60) > /dev/null 2>&1 & sleep 0.2; echo bg"}}]},
+ {"text": "wait", "calls": [{"name": "bash", "arguments": {"command": "sleep 2"}}]},
+ {"text": "Done."}]`
+	os.WriteFile(filepath.Join(dir, "mock.json"), []byte(mock), 0o644)
+	cmd := exec.Command(bin, "--acp", "--mock", filepath.Join(dir, "mock.json"), "--permissions", "auto")
+	cmd.Dir = dir
+	cmd.Env = testEnv("XDG_STATE_HOME="+dir, "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir)
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	send := func(id int, method string, params any) {
+		data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+		stdin.Write(append(data, '\n'))
+	}
+	lines := bufio.NewScanner(stdout)
+	until := func(match func(map[string]any) bool) map[string]any {
+		for lines.Scan() {
+			var m map[string]any
+			if json.Unmarshal(lines.Bytes(), &m) == nil && match(m) {
+				return m
+			}
+		}
+		t.Fatalf("stdout ended; stderr %s", stderr.String())
+		return nil
+	}
+	send(1, "initialize", map[string]any{"protocolVersion": 1})
+	until(func(m map[string]any) bool { return m["id"] == float64(1) })
+	send(2, "session/new", map[string]any{"cwd": dir, "mcpServers": []any{}})
+	sid := until(func(m map[string]any) bool { return m["id"] == float64(2) })["result"].(map[string]any)["sessionId"]
+	send(3, "session/prompt", map[string]any{"sessionId": sid, "prompt": []any{map[string]any{"type": "text", "text": "go"}}})
+	// The second call is running once its tool_call is out.
+	until(func(m map[string]any) bool { return strings.Contains(fmt.Sprint(m["params"]), "sleep 2") })
+	// stdin stays open: the write after sleep 2 fails, and that alone must stop gilda.
+	stdout.Close()
+	defer stdin.Close()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && !exit.Exited() {
+			t.Fatalf("gilda died of %v; stderr %s", exit, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("gilda still ran 10 s after its client died")
+	}
+	pid, err := os.ReadFile(filepath.Join(dir, "job.pid"))
+	if err != nil {
+		t.Fatalf("the background job never started: %v", err)
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(pid)))
+	if n > 0 && syscall.Kill(n, 0) == nil {
+		syscall.Kill(n, syscall.SIGKILL)
+		t.Error("the turn's background job outlived gilda")
+	}
+	saved, _ := filepath.Glob(filepath.Join(dir, "gilda", "sessions", "*", "*"))
+	if len(saved) == 0 {
+		saved, _ = filepath.Glob(filepath.Join(dir, "gilda", "sessions", "*"))
+	}
+	if len(saved) == 0 {
+		t.Error("no session was saved")
+	}
+}
+
+// acpProcess starts gilda --acp in dir on mock, initializes it and opens a session.
+func acpProcess(t *testing.T, dir, mock string) (*exec.Cmd, func(int, string, any), *bufio.Scanner, any, *bytes.Buffer) {
+	t.Helper()
+	os.WriteFile(filepath.Join(dir, "mock.json"), []byte(mock), 0o644)
+	cmd := exec.Command(bin, "--acp", "--mock", filepath.Join(dir, "mock.json"), "--permissions", "auto")
+	cmd.Dir = dir
+	cmd.Env = testEnv("XDG_STATE_HOME="+dir, "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir)
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stdin.Close(); cmd.Process.Kill(); cmd.Wait() })
+	send := func(id int, method string, params any) {
+		data, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+		stdin.Write(append(data, '\n'))
+	}
+	lines := bufio.NewScanner(stdout)
+	lines.Buffer(nil, 1<<24)
+	reply := func(id int) map[string]any {
+		for lines.Scan() {
+			var m map[string]any
+			if json.Unmarshal(lines.Bytes(), &m) == nil && m["id"] == float64(id) {
+				return m
+			}
+		}
+		t.Fatalf("stdout ended before response %d; stderr %s", id, stderr.String())
+		return nil
+	}
+	send(1, "initialize", map[string]any{"protocolVersion": 1})
+	reply(1)
+	send(2, "session/new", map[string]any{"cwd": dir, "mcpServers": []any{}})
+	sid := reply(2)["result"].(map[string]any)["sessionId"]
+	return cmd, send, lines, sid, stderr
+}
+
+// exited waits up to d for cmd to end.
+func exited(cmd *exec.Cmd, d time.Duration) (error, bool) {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err, true
+	case <-time.After(d):
+		return nil, false
+	}
+}
+
+// A client that stops reading blocks gilda's writes, and so its shutdown. A second signal
+// still ends it.
+func TestACPASecondSignalEndsAStuckShutdown(t *testing.T) {
+	dir := t.TempDir()
+	cmd, send, _, sid, stderr := acpProcess(t, dir, `[{"text": "`+strings.Repeat("word ", 100000)+`"}]`)
+	send(3, "session/prompt", map[string]any{"sessionId": sid, "prompt": []any{map[string]any{"type": "text", "text": "go"}}})
+	time.Sleep(time.Second) // stdout is not read, so the pipe fills
+	cmd.Process.Signal(syscall.SIGTERM)
+	time.Sleep(500 * time.Millisecond)
+	cmd.Process.Signal(syscall.SIGTERM)
+	if _, ok := exited(cmd, 5*time.Second); !ok {
+		t.Fatalf("gilda still ran 5 s after two SIGTERMs; stderr %s", stderr.String())
+	}
+}
+
+// One signal ends a running prompt cleanly and saves the session.
+func TestACPSavesTheSessionOnASignal(t *testing.T) {
+	dir := t.TempDir()
+	cmd, send, lines, sid, stderr := acpProcess(t, dir,
+		`[{"text": "wait", "calls": [{"name": "bash", "arguments": {"command": "sleep 5"}}]}, {"text": "Done."}]`)
+	send(3, "session/prompt", map[string]any{"sessionId": sid, "prompt": []any{map[string]any{"type": "text", "text": "go"}}})
+	for lines.Scan() && !strings.Contains(lines.Text(), "sleep 5") {
+	}
+	go func() {
+		for lines.Scan() {
+		}
+	}()
+	cmd.Process.Signal(syscall.SIGTERM)
+	err, ok := exited(cmd, 5*time.Second)
+	if !ok || err != nil {
+		t.Fatalf("exit %v (ended %v); stderr %s", err, ok, stderr.String())
+	}
+	if saved, _ := filepath.Glob(filepath.Join(dir, "gilda", "sessions", "*.json")); len(saved) == 0 {
+		t.Error("no session was saved")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync/atomic"
 
 	"github.com/shakfu/gilda/llm"
 	"github.com/shakfu/gilda/price"
@@ -29,6 +30,9 @@ const Cancelled = "cancelled by the user"
 var ErrContextFull = errors.New("context window is full; start a new conversation")
 
 var errRefused = errors.New("the model refused the request")
+
+// ErrMaxTurns means a prompt used MaxTurns round-trips and the model still called tools.
+var ErrMaxTurns = errors.New("stopped")
 
 // ContextFull reports whether err means the conversation no longer fits, whether gilda refused
 // the request or the provider did.
@@ -80,7 +84,12 @@ type Agent struct {
 	Used int64
 	// warned is set once the model has been told the window is nearly full.
 	warned bool
+	// seq tells this agent's generated call ids from a subagent's; 0 until first needed.
+	seq int64
 }
+
+// agents numbers the agents that generate call ids.
+var agents atomic.Int64
 
 func New(cfg Config) *Agent {
 	if cfg.MaxTokens == 0 {
@@ -230,9 +239,13 @@ func (a *Agent) Run(ctx context.Context, prompt string, emit func(Event)) (Resul
 			msg.Text, msg.Native = "(no response)", nil
 		}
 		for i := range msg.Calls {
-			// Some local servers send calls without ids; results must still address them.
+			// Some local servers send calls without ids; results must still address them. The
+			// history length keeps ids unique across a resumed session.
 			if msg.Calls[i].ID == "" {
-				msg.Calls[i].ID = fmt.Sprintf("call_%d_%d", len(a.History), i)
+				if a.seq == 0 {
+					a.seq = agents.Add(1)
+				}
+				msg.Calls[i].ID = fmt.Sprintf("call_%d_%d_%d", a.seq, len(a.History), i)
 			}
 		}
 		a.History = append(a.History, msg)
@@ -262,7 +275,7 @@ func (a *Agent) Run(ctx context.Context, prompt string, emit func(Event)) (Resul
 			return res, nil
 		}
 	}
-	return res, fmt.Errorf("stopped after %d round-trips; raise --max-turns or continue with a new prompt", a.MaxTurns)
+	return res, fmt.Errorf("%w after %d round-trips; raise --max-turns or continue with a new prompt", ErrMaxTurns, a.MaxTurns)
 }
 
 func (a *Agent) request() llm.Request {

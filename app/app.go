@@ -103,6 +103,10 @@ type App struct {
 	created      time.Time
 	// saved is the Updated time of the session file as this App last wrote or read it.
 	saved time.Time
+	// costBase is what the conversation cost before it was resumed; costStart is Agent.Usage's
+	// cost when this conversation began or was resumed.
+	costBase  *float64
+	costStart float64
 	// warns are reported by Prepare.
 	warns []error
 	// applyPatch is tools.apply_patch from settings.toml; nil decides by provider.
@@ -407,6 +411,7 @@ func (a *App) resume(s *session) {
 	}
 	history, dropped := s.restore()
 	a.Agent.History, a.Agent.Used, a.Agent.SessionID, a.created, a.saved = history, s.Used, s.ID, s.Created, s.Updated
+	a.costBase, a.costStart = s.Cost, a.usageCost()
 	if dropped > 0 {
 		a.warns = append(a.warns, fmt.Errorf("session %s: reasoning of %d messages could not be restored; they resume as text", s.ID, dropped))
 	}
@@ -418,6 +423,27 @@ func (a *App) Reset() {
 	a.Seen.Reset()
 	a.Agent.SessionID = newSessionID()
 	a.created, a.saved = time.Time{}, time.Time{}
+	a.costBase, a.costStart = nil, a.usageCost()
+}
+
+func (a *App) usageCost() float64 {
+	if c := a.Agent.Usage.Cost; c != nil {
+		return *c
+	}
+	return 0
+}
+
+// SessionCost is the USD cost of the current conversation, including the runs it was resumed
+// from; nil when no cost is known.
+func (a *App) SessionCost() *float64 {
+	if a.costBase == nil && a.Agent.Usage.Cost == nil {
+		return nil
+	}
+	c := a.usageCost() - a.costStart
+	if a.costBase != nil {
+		c += *a.costBase
+	}
+	return &c
 }
 
 // Prepare loads the price list and resolves the context window and, for a local server, the

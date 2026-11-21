@@ -618,3 +618,38 @@ func TestATaskThatStopsEarlyReportsWhatItHas(t *testing.T) {
 		t.Fatal("an empty prompt was accepted")
 	}
 }
+
+// noIDs is a provider that sends calls without ids, as some local servers do.
+type noIDs struct{ *mock.Provider }
+
+func (p noIDs) Stream(ctx context.Context, req llm.Request, emit func(llm.Event)) (llm.Response, error) {
+	resp, err := p.Provider.Stream(ctx, req, emit)
+	for i := range resp.Message.Calls {
+		resp.Message.Calls[i].ID = ""
+	}
+	return resp, err
+}
+
+// A subagent and its caller both start at history length 1, so generated ids must not depend
+// on that alone: a frontend keys its tool calls by id.
+func TestGeneratedCallIDsDifferBetweenATaskAndItsCaller(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "a"), []byte("x"), 0o644)
+	child := noIDs{mock.New(mock.Step{Calls: []mock.Call{call("read", map[string]string{"path": "a"})}}, mock.Step{Text: "found"})}
+	task := Task{New: func() *Agent {
+		return New(Config{Provider: child, Model: "m", Tools: []tool.Tool{tool.Read{Env: tool.Env{Root: root}}}})
+	}}
+	parent := noIDs{mock.New(mock.Step{Calls: []mock.Call{call("task", map[string]string{"prompt": "find"})}}, mock.Step{Text: "done"})}
+	a := New(Config{Provider: parent, Model: "m", Tools: []tool.Tool{task}})
+	var ids []string
+	if _, err := a.Run(context.Background(), "go", func(e Event) {
+		if c, ok := e.(ToolCall); ok {
+			ids = append(ids, c.Call.ID)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] == "" || ids[0] == ids[1] {
+		t.Fatalf("call ids %q", ids)
+	}
+}

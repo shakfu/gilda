@@ -232,3 +232,36 @@ func TestConcurrentResumesFork(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A session's cost is saved and goes on from there when resumed; /clear starts it at zero.
+func TestTheSessionCostSurvivesAResume(t *testing.T) {
+	dir, root := t.TempDir(), t.TempDir()
+	cost := func(c float64) *float64 { return &c }
+	a := sessionApp(t, dir, root, Options{})
+	if a.SessionCost() != nil {
+		t.Fatalf("a new app's cost is %v, want unknown", *a.SessionCost())
+	}
+	if _, err := a.Agent.Run(context.Background(), "first", nil); err != nil {
+		t.Fatal(err)
+	}
+	a.Agent.Usage.Cost = cost(0.5)
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b := sessionApp(t, dir, root, Options{Continue: true})
+	if c := b.SessionCost(); c == nil || *c != 0.5 {
+		t.Fatalf("resumed cost %v, want 0.5", c)
+	}
+	b.Agent.Usage.Cost = cost(0.25)
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+	c := sessionApp(t, dir, root, Options{Continue: true})
+	if got := c.SessionCost(); got == nil || *got != 0.75 {
+		t.Fatalf("cost after two resumes %v, want 0.75", got)
+	}
+	b.Reset()
+	if got := b.SessionCost(); got == nil || *got != 0 {
+		t.Fatalf("cost after a reset %v, want 0", got)
+	}
+}
