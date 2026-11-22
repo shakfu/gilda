@@ -1,0 +1,23 @@
+[
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "calls": [
+   {
+    "name": "bash",
+    "arguments": {
+     "command": "cat services/*/limits.go services/*/policy.go services/*/client.go services/search/override.go"
+    }
+   }
+  ]
+ },
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "text": "billing=7 auth=4 search=9 mail=6"
+ }
+]

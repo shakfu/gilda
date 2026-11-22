@@ -69,7 +69,9 @@ func Run(ctx context.Context, a *app.App, opts Options) error {
 
 type (
 	eventMsg struct{ ev agent.Event }
-	doneMsg  struct {
+	// bgMsg is an event from a background task, sent on the REPL's own channel.
+	bgMsg   struct{ ev agent.Event }
+	doneMsg struct {
 		res agent.Result
 		err error
 		// saveErr is set when the session could not be saved.
@@ -119,9 +121,16 @@ type model struct {
 	stopped bool
 	cancel  context.CancelFunc
 	events  chan tea.Msg
-	tasks   tasks // goroutines that Run waits for
-	started time.Time
-	queue   []string
+	// bg lasts as long as the REPL. Approvals and background task events arrive on it, since a
+	// task can outlive the run whose events channel closes.
+	bg chan tea.Msg
+	// waiting holds approvals that arrived while another was on screen.
+	waiting []approvalMsg
+	// quitArmed is set when a quit was refused because tasks run; a second quit goes ahead.
+	quitArmed bool
+	tasks     tasks // goroutines that Run waits for
+	started   time.Time
+	queue     []string
 
 	partial   string // assistant text after the last newline
 	reply     string // assistant text of the current response
@@ -144,7 +153,9 @@ type model struct {
 	trust string
 	// always holds what the user allowed until /clear or /permissions: a tool, for one kind of
 	// reason and, for a network tool, one host. A secret or protected path is never added.
-	always map[permission.Allowance]bool
+	// Agents and tasks read it from their goroutines, under alwaysMu.
+	always   map[permission.Allowance]bool
+	alwaysMu sync.Mutex
 	// Tab cycles through the commands that start with tabSeed; tabLast is the one it set last.
 	tabIdx           int
 	tabSeed, tabLast string
@@ -178,8 +189,10 @@ func newModel(ctx context.Context, a *app.App, opts Options) *model {
 		ctx: ctx, app: a, opts: opts, st: st, md: markdown{st: st, width: 80},
 		width: 80, input: in, hist: hist, histPos: len(hist.Entries),
 		spin: spinner.New(spinner.WithSpinner(spinner.Line), spinner.WithStyle(st.Warn)),
-		busy: "loading", always: map[permission.Allowance]bool{},
+		busy: "loading", always: map[permission.Allowance]bool{}, bg: make(chan tea.Msg, eventBuffer),
 	}
+	a.SetPermissions("", askVia(m.bg, a.Preview, m.allowed))
+	a.Agent.Tasks.SetSink(m.sendBg)
 	if text := strings.TrimSpace(opts.Prompt); text != "" {
 		m.input.Placeholder = ""
 		m.hist.Add(text)
@@ -192,10 +205,38 @@ func newModel(ctx context.Context, a *app.App, opts Options) *model {
 
 func (m *model) Init() tea.Cmd {
 	a := m.app
-	return tea.Batch(m.spin.Tick, m.background(func() tea.Msg {
+	return tea.Batch(m.spin.Tick, m.listenBg(), m.background(func() tea.Msg {
 		warns, err := a.Prepare(m.ctx)
 		return prepMsg{warns: warns, err: err}
 	}))
+}
+
+// sendBg passes a background task's event to the REPL. It never blocks the task: when the
+// channel is full, a goroutine waits to deliver it, so a task being cancelled while the UI is
+// busy cannot stall.
+func (m *model) sendBg(e agent.Event) {
+	select {
+	case m.bg <- bgMsg{e}:
+	default:
+		go func() {
+			select {
+			case m.bg <- bgMsg{e}:
+			case <-m.ctx.Done():
+			}
+		}()
+	}
+}
+
+// listenBg waits for the next message on the REPL's own channel.
+func (m *model) listenBg() tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case msg := <-m.bg:
+			return msg
+		case <-m.ctx.Done():
+			return nil
+		}
+	}
 }
 
 // background runs f as a command that Run waits for.
@@ -302,24 +343,28 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Sequence(m.flush(), listen(m.events))
 
 	case approvalMsg:
-		if m.allowed(msg.call.Name, msg.why) {
+		switch {
+		case m.allowed(msg.call.Name, msg.why):
 			msg.reply <- true
-		} else {
-			m.approval = &msg
-			m.phase = "waiting for approval"
-			m.herdrReport("blocked", "allow "+msg.label+"?")
-			for _, l := range ApprovalLines(m.st, msg.label, msg.preview, m.width) {
-				m.out(l)
-			}
-			return m, tea.Sequence(m.flush(), m.notify("waiting for approval"), listen(m.events))
+		case m.approval != nil:
+			m.waiting = append(m.waiting, msg)
+		default:
+			return m, tea.Sequence(m.ask(msg), m.listenBg())
 		}
-		return m, tea.Sequence(m.flush(), listen(m.events))
+		return m, tea.Sequence(m.flush(), m.listenBg())
+
+	case bgMsg:
+		return m, tea.Sequence(m.bgEvent(msg.ev), m.listenBg())
 
 	case doneMsg:
 		ping := m.notify("done")
 		m.finish(msg)
 		m.herdrReport("idle", "")
-		return m, tea.Sequence(m.flush(), ping, m.next())
+		next := m.next()
+		if next == nil {
+			next = m.deliver()
+		}
+		return m, tea.Sequence(m.flush(), ping, next)
 
 	case spinner.TickMsg:
 		if !m.running && m.busy == "" {
@@ -360,6 +405,7 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			return nil, true
 		}
 		m.input.Reset()
+		m.quitArmed = false
 		m.input.Placeholder = "" // hint only before the first entry
 		m.hist.Add(text)
 		m.histPos, m.draft = len(m.hist.Entries), ""
@@ -382,12 +428,12 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		case m.input.Value() != "":
 			m.input.Reset()
 		default:
-			return tea.Quit, true
+			return m.quit(), true
 		}
 		return nil, true
 	case "ctrl+d":
 		if m.input.Value() == "" && !m.running {
-			return tea.Quit, true
+			return m.quit(), true
 		}
 	case "up", "ctrl+p":
 		if !strings.Contains(m.input.Value(), "\n") && m.histPos > 0 {
@@ -432,7 +478,68 @@ func (m *model) next() tea.Cmd {
 		}
 		m.out(m.st.Accent.Bold(true).Render(p) + m.st.User.Render(l))
 	}
+	// With deliver = "prompt", finished tasks are named ahead of the next prompt.
+	if m.app.Deliver() == "prompt" {
+		if n := m.app.Agent.Tasks.Notice(); n != "" {
+			m.out(m.st.Dim.Render(n))
+			text = n + "\n\n" + text
+		}
+	}
 	return tea.Sequence(m.flush(), m.start(text))
+}
+
+// deliver starts a turn naming the background tasks that finished, when tasks.deliver is auto
+// and nothing else holds the REPL.
+func (m *model) deliver() tea.Cmd {
+	if m.app.Deliver() != "auto" || m.running || m.busy != "" || m.trust != "" || m.approval != nil ||
+		m.picker != nil || len(m.queue) > 0 {
+		return nil
+	}
+	if !m.app.Agent.Tasks.News() {
+		return nil
+	}
+	n := m.app.Agent.Tasks.Notice()
+	m.out("", m.st.Dim.Render(n))
+	return tea.Sequence(m.flush(), m.start(n))
+}
+
+// bgEvent shows an event from a background task. A finished task of the conversation's own
+// counts in the session and may start a turn; one inside a task is shown only, since its usage
+// is in that task's.
+func (m *model) bgEvent(ev agent.Event) tea.Cmd {
+	switch e := ev.(type) {
+	case agent.TaskDone:
+		m.session.Add(e.Usage)
+		m.out(m.st.Dim.Render(TaskLine(e)))
+		return tea.Sequence(m.flush(), m.deliver())
+	case agent.TaskEvent:
+		switch in := Untag(e).(type) {
+		case agent.ToolResult:
+			m.out(ToolLine(m.st, in, m.width))
+		case agent.Retry:
+			m.out(m.st.Warn.Render("[" + e.ID + "] " + RetryLine(in)))
+		case agent.TaskDone:
+			m.out(m.st.Dim.Render(TaskLine(in)))
+		}
+	}
+	return m.flush()
+}
+
+// quit leaves the REPL, unless background tasks are running and this is the first try.
+func (m *model) quit() tea.Cmd {
+	if n := len(m.app.Agent.Tasks.Running()); n > 0 && !m.quitArmed {
+		m.quitArmed = true
+		m.out(m.st.Warn.Render(fmt.Sprintf("%s running; quit again to cancel and leave", plural(n, "task"))))
+		return m.flush()
+	}
+	return tea.Quit
+}
+
+// forget drops what "a" allowed.
+func (m *model) forget() {
+	m.alwaysMu.Lock()
+	clear(m.always)
+	m.alwaysMu.Unlock()
 }
 
 func (m *model) start(text string) tea.Cmd {
@@ -443,8 +550,6 @@ func (m *model) start(text string) tea.Cmd {
 	m.prompts++
 	ch := make(chan tea.Msg, eventBuffer)
 	m.events = ch
-	// Set before the run starts, so the agent goroutine only reads it.
-	m.app.SetPermissions("", askVia(ch, m.app.Preview, m.allowed))
 	ag := m.app.Agent
 	// Sends watch m.ctx, not ctx: Esc cancels ctx, and doneMsg must still arrive.
 	send := func(msg tea.Msg) {
@@ -528,12 +633,37 @@ func askVia(ch chan<- tea.Msg, preview func(tool.Tool, llm.ToolCall) string, all
 	}
 }
 
+// ask shows an approval question and waits for y, n or a.
+func (m *model) ask(q approvalMsg) tea.Cmd {
+	m.approval = &q
+	m.phase = "waiting for approval"
+	m.herdrReport("blocked", "allow "+q.label+"?")
+	for _, l := range ApprovalLines(m.st, q.label, q.preview, m.width) {
+		m.out(l)
+	}
+	return tea.Sequence(m.flush(), m.notify("waiting for approval"))
+}
+
 func (m *model) approvalKey(msg tea.KeyPressMsg) tea.Cmd {
 	q := m.approval
 	answer := func(ok bool) {
 		m.approval, m.phase = nil, q.label
 		m.herdrReport("working", "")
 		q.reply <- ok
+	}
+	// The next waiting question, once this one is answered. One that an "a" now covers is let
+	// through without asking.
+	following := func() tea.Cmd {
+		for len(m.waiting) > 0 {
+			w := m.waiting[0]
+			m.waiting = m.waiting[1:]
+			if m.allowed(w.call.Name, w.why) {
+				w.reply <- true
+				continue
+			}
+			return m.ask(w)
+		}
+		return nil
 	}
 	switch msg.String() {
 	case "y":
@@ -542,28 +672,42 @@ func (m *model) approvalKey(msg tea.KeyPressMsg) tea.Cmd {
 		if !q.why.Lasting() {
 			break
 		}
+		m.alwaysMu.Lock()
 		for _, a := range q.why.Allowances(q.call.Name) {
 			m.always[a] = true
 		}
+		m.alwaysMu.Unlock()
 		m.out(m.st.Dim.Render("  " + q.why.Scope(q.call.Name) + " allowed until /clear or /permissions"))
 		answer(true)
 	case "n", "esc":
 		answer(false)
 	case "ctrl+c":
 		answer(false)
-		m.stopped = true
-		m.cancel()
+		// A background task's question can come while no turn runs.
+		if m.running {
+			m.stopped = true
+			m.cancel()
+		}
 	}
-	return m.flush()
+	if m.approval != nil {
+		return m.flush()
+	}
+	next := following()
+	if next == nil {
+		next = m.deliver()
+	}
+	return tea.Sequence(m.flush(), next)
 }
 
-// allowed reports whether an earlier "a" covers a call. The agent goroutine calls it too. That is
-// safe because always changes only while the agent waits for an approval or no run is active.
+// allowed reports whether an earlier "a" covers a call. Agents and tasks call it from their
+// goroutines.
 func (m *model) allowed(name string, why permission.Reason) bool {
 	need := why.Allowances(name)
 	if len(need) == 0 {
 		return false
 	}
+	m.alwaysMu.Lock()
+	defer m.alwaysMu.Unlock()
 	for _, a := range need {
 		if !m.always[a] {
 			return false
@@ -717,6 +861,9 @@ func (m *model) banner(warns []error) {
 	if m.app.Distrusted() {
 		m.out(m.st.Dim.Render("  " + distrustNote))
 	}
+	if tm := m.app.TaskModel(); tm != "" {
+		m.out(m.st.Dim.Render("  task model: " + tm))
+	}
 	m.resumedLines()
 	for _, w := range warns {
 		m.out(m.st.Warn.Render("warning: " + w.Error()))
@@ -811,6 +958,9 @@ func (m *model) statusBar() string {
 	}
 	if n := len(m.queue); n > 0 {
 		left += m.st.BarLeft.Render(fmt.Sprintf("%d queued", n))
+	}
+	if n := len(m.app.Agent.Tasks.Running()); n > 0 {
+		left += m.st.BarLeft.Render(plural(n, "task"))
 	}
 	// A narrow terminal drops cost, effort and ctx, in that order, then cuts the model id, then
 	// drops the mode. The mode goes last, since it says what runs unasked.

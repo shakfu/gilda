@@ -39,6 +39,12 @@ const SettingsFile = "settings.toml"
 //	[session]
 //	save = false
 //
+//	[tasks]
+//	depth = 1
+//	running = 2
+//	budget = 500000
+//	deliver = "prompt"
+//
 // The mode applies when neither --permissions nor GILDA_PERMISSIONS sets one; max_tokens,
 // max_turns and context apply when their flags are not given. The patterns add to the built-in
 // ones and cannot lift them. A key left out takes gilda's default.
@@ -50,6 +56,20 @@ type Settings struct {
 	Prices      Prices      `toml:"prices"`
 	Session     Session     `toml:"session"`
 	REPL        REPL        `toml:"repl"`
+	Tasks       Tasks       `toml:"tasks"`
+}
+
+// Tasks bounds background tasks; see agent.TaskOptions and docs/dev/async-tasks.md. Deliver is
+// "auto", which starts a REPL turn when a task finishes while the REPL is idle, or "prompt",
+// which waits for the next prompt. Empty means auto.
+type Tasks struct {
+	Depth   *int   `toml:"depth"`
+	Running *int   `toml:"running"`
+	Budget  *int64 `toml:"budget"`
+	Deliver string `toml:"deliver"`
+	// Model is the model tasks run on, of the session's provider; empty means the
+	// conversation's. --task-model overrides it.
+	Model string `toml:"model"`
 }
 
 // REPL sets how the REPL gets the user's attention when a long turn ends or needs an approval:
@@ -165,6 +185,9 @@ func (s Settings) validate() error {
 		{"tools.bash_timeout", widen(s.Tools.BashTimeout), 1},
 		{"tools.bash_max_timeout", widen(s.Tools.BashMaxTimeout), 1},
 		{"permissions.diff_max_bytes", widen(s.Permissions.DiffMaxBytes), 1},
+		{"tasks.depth", widen(s.Tasks.Depth), 1},
+		{"tasks.running", widen(s.Tasks.Running), 1},
+		{"tasks.budget", s.Tasks.Budget, 10000},
 	}
 	for _, c := range checks {
 		if c.v != nil && *c.v < c.min {
@@ -175,6 +198,11 @@ func (s Settings) validate() error {
 	case "", "bell", "osc9", "off":
 	default:
 		return fmt.Errorf("repl.notify must be bell, osc9 or off, not %q", s.REPL.Notify)
+	}
+	switch s.Tasks.Deliver {
+	case "", "auto", "prompt":
+	default:
+		return fmt.Errorf("tasks.deliver must be auto or prompt, not %q", s.Tasks.Deliver)
 	}
 	for _, name := range s.Tools.BashEnv {
 		if name == "" || strings.ContainsAny(name, "= ") {

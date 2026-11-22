@@ -49,6 +49,9 @@ Flags:
       --tools NAMES          offer only these tool NAMES, such as
                              read,bash (default: all)
       --append-system TEXT   add TEXT to the end of the system prompt
+      --task-model ID        run task subagents on model ID of the same
+                             provider (default: settings.toml, else the
+                             conversation's model)
   -c, --continue             resume the newest session saved for the
                              working directory
       --resume ID            resume the session with this ID, or a unique
@@ -56,6 +59,8 @@ Flags:
       --sessions             list the sessions saved for the working
                              directory and exit
       --refresh-models       refetch the price list, ignoring the cache
+      --acp                  serve the Agent Client Protocol on stdin and
+                             stdout, for an editor
   -h, --help                 print this help
   -v, --version              print the version
 ```
@@ -89,11 +94,11 @@ Start llama-server with `--jinja` so tool calls work.
 
 ## Features
 
-- **Tools:** 5, and `apply_patch` for OpenAI models. `read` returns numbered lines, 2000 at most, with `offset` and `limit`, and summarises a binary file instead of dumping it. On a directory it lists the entries, sorted, with `/` after a directory and `@` after a symlink, so `read-only` mode can explore without `bash`. A PNG, JPEG, GIF or WebP file up to 3 MiB is returned as an image, for a model that accepts images: one OpenRouter's list marks so, or one of the `anthropic` or `openai` models it does not list. Other models get a note in its place, and the image stays in the history for a later model that does. Ask the model to `read` a screenshot by its path. `edit`, and `write` over an existing file, refuse a file that `read` has not returned in this conversation, or one whose size or modification time changed since, such as after a formatter ran through `bash`; the model reads it again. Each edit or write records the file it leaves, so consecutive edits need no read between them. `write` creates or replaces a file. `edit` replaces one exact string, or every one with `replace_all`. `bash` runs `bash -c` in its own process group, 120 s by default and 600 s at most. `apply_patch` applies a patch in the format OpenAI's Codex models write: files added, updated, moved or deleted, each update as hunks of context and changed lines, matched exactly, then ignoring trailing whitespace, then ignoring indentation. It writes nothing unless every file applies, and shows the diff of each file on approval. It is offered when the provider is `openai`, or `openrouter` with an `openai/` model, and fixed for the session; `apply_patch = true` or `false` under `[tools]` overrides that. `task` runs a subagent on a self-contained research question and returns its final answer, so its searches and file contents stay out of the conversation. The subagent uses the same provider, model and permission mode, with `read` and `bash` only and no knowledge of the conversation. Its tool calls show marked `[task]` and ask as the caller's do, and its tokens and cost count in the session. It cannot call `task` itself. `task = false` under `[tools]` turns it off. A result over 32 KiB keeps its first fifth and last four fifths.
+- **Tools:** 5, and `apply_patch` for OpenAI models. `read` returns numbered lines, 2000 at most, with `offset` and `limit`, and summarises a binary file instead of dumping it. On a directory it lists the entries, sorted, with `/` after a directory and `@` after a symlink, so `read-only` mode can explore without `bash`. A PNG, JPEG, GIF or WebP file up to 3 MiB is returned as an image, for a model that accepts images: one OpenRouter's list marks so, or one of the `anthropic` or `openai` models it does not list. Other models get a note in its place, and the image stays in the history for a later model that does. Ask the model to `read` a screenshot by its path. `edit`, and `write` over an existing file, refuse a file that `read` has not returned in this conversation, or one whose size or modification time changed since, such as after a formatter ran through `bash`; the model reads it again. Each edit or write records the file it leaves, so consecutive edits need no read between them. `write` creates or replaces a file. `edit` replaces one exact string, or every one with `replace_all`. `bash` runs `bash -c` in its own process group, 120 s by default and 600 s at most. `apply_patch` applies a patch in the format OpenAI's Codex models write: files added, updated, moved or deleted, each update as hunks of context and changed lines, matched exactly, then ignoring trailing whitespace, then ignoring indentation. It writes nothing unless every file applies, and shows the diff of each file on approval. It is offered when the provider is `openai`, or `openrouter` with an `openai/` model, and fixed for the session; `apply_patch = true` or `false` under `[tools]` overrides that. `task` runs a subagent on a self-contained research question and returns its final answer, so its searches and file contents stay out of the conversation. The subagent uses the same provider, model and permission mode, with `read` and `bash` only and no knowledge of the conversation. Its tool calls show marked `[task]` and ask as the caller's do, and its tokens and cost count in the session. With `background: true`, `task` returns an id such as `t1` at once, and the subagent runs while the conversation goes on. `task_collect` reads finished answers, waits for one, or cancels; a task's answer reaches the conversation only through it. When a task finishes, the model is told in the next tool result, or the REPL starts a turn saying so if it is idle. A subagent can start tasks of its own, 2 levels deep by default, and answers only once they have. At most 4 run at once. `[tasks]` sets these; see [`docs/dev/async-tasks.md`](docs/dev/async-tasks.md). `--task-model ID`, or `model` under `[tasks]`, runs tasks on another model of the same provider, such as a cheaper one under a stronger conversation; by default they use the conversation's. `task = false` under `[tools]` turns both tools off. A result over 32 KiB keeps its first fifth and last four fifths.
 
 - **REPL:** output goes to the terminal's scrollback. An input box and a status bar stay pinned below it. The bar shows the working directory, or a spinner, elapsed time and the current step, then the model, effort, context used and session cost. Assistant text streams as styled markdown, one line at a time; a table prints aligned once its last row arrives. Each tool call gets one line, such as `[tool] read main.go:1-80 -> 80 lines` or `[tool] $ go test -> exit 1: FAIL`. Each prompt ends with a usage line: context, tokens in with the cached share, tokens out, cost.
 
-- **Headless:** `-p` streams the answer to stdout and everything else to stderr. `--json` prints one record per line: `start`, `turn`, `tool_call`, `tool_result`, `retry`, `elided` and `task`, then a final `result` with `outcome`, `text`, `error`, `turns`, `usage` and `context_used`. `outcome` is `complete`, `truncated` (cut at `max_tokens`), `error` or `cancelled`. Exit status 0 when complete or truncated, 1 on error, 2 on a usage error, 130 when cancelled. Plain-text stdout gets each response's text when the response ends, so a response resent after a cut stream prints once.
+- **Headless:** `-p` streams the answer to stdout and everything else to stderr. `--json` prints one record per line: `start`, `turn`, `tool_call`, `tool_result`, `retry`, `elided` and `task`, then a final `result` with `outcome`, `text`, `error`, `turns`, `usage` and `context_used`. A record from inside a background task carries a `task` field with its id. `-p` ends once every background task has, and its `usage` includes theirs. `outcome` is `complete`, `truncated` (cut at `max_tokens`), `error` or `cancelled`. Exit status 0 when complete or truncated, 1 on error, 2 on a usage error, 130 when cancelled. Plain-text stdout gets each response's text when the response ends, so a response resent after a cut stream prints once.
 
 - **Network:** a response streams with no overall timeout, so a long answer is never cut off; Esc or Ctrl-C ends a stalled one. When a provider's SDK retries a request, the REPL's status bar and a `[retry] 1 after 503 Service Unavailable` line say why, as do `-p`'s stderr and a `retry` record in `--json`. Anthropic and OpenAI retry up to 4 times, the local providers twice, OpenRouter for up to a minute. A response cut off mid-stream is sent again by gilda itself, up to twice in a row; the cut response never enters the history. `GILDA_LOG=FILE` records each request's endpoint and status and the raw response stream, never request bodies or headers.
 
@@ -267,6 +272,13 @@ save = true            # save conversations for --continue and --resume
 
 [repl]
 notify = "bell"        # after a turn of 30 s or more: bell, osc9 or off
+
+[tasks]
+depth = 2              # how deep background tasks nest; 1: subagents start none
+running = 4            # tasks running at once
+budget = 500000        # tokens all tasks of a conversation may use; default: none
+deliver = "auto"       # REPL: auto starts a turn when a task finishes; prompt waits
+model = "claude-haiku-5-5" # tasks' model, of the session's provider; default: the conversation's
 ```
 
 | Key | Affects |
@@ -306,11 +318,12 @@ A turn that has run for 30 seconds rings the terminal bell when it ends or waits
 | `/effort [level]` | `low`, `medium`, `high`, `xhigh`, `max` or `default`; remembered |
 | `/permissions [mode]` | `auto`, `ask`, `all` or `read-only`; without a mode, pick one |
 | `/thinking` | show or hide streamed reasoning |
-| `/clear` | new conversation, saved as a new session; session cost is kept |
+| `/clear` | new conversation, saved as a new session; session cost is kept; cancels background tasks |
 | `/sessions` | list the conversations saved for this directory |
 | `/resume [id]` | continue a saved conversation, keeping the provider and model; without an id, pick one |
 | `/cost` | session tokens and cost |
-| `/help`, `/exit`, `/quit` | |
+| `/tasks [cancel id]` | list background tasks, or stop one and its own tasks |
+| `/help`, `/exit`, `/quit` | with tasks running, quitting asks for a second try |
 
 ### Editors: `--acp`
 

@@ -1,0 +1,9 @@
+[
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "text": "billing=9 auth=4 search=8 mail=5"
+ }
+]

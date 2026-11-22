@@ -717,3 +717,58 @@ func TestACPSavesTheSessionOnASignal(t *testing.T) {
 		t.Error("no session was saved")
 	}
 }
+
+// A background task's answer comes back through task_collect; --json reports the task, and
+// text mode tags its line on stderr.
+func TestHeadlessBackgroundTask(t *testing.T) {
+	// One response starts the task and waits for it, so the task takes the second step.
+	script := `[
+  {"calls": [{"name": "task", "arguments": {"prompt": "look", "background": true, "name": "look"}},
+             {"name": "task_collect", "arguments": {"wait": 10}}]},
+  {"text": "child answer", "usage": {"input_tokens": 7, "output_tokens": 1}},
+  {"text": "final", "usage": {"input_tokens": 20, "output_tokens": 3}}
+]`
+	stdout, stderr, code := gilda(t, script, "-p", "go", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	var collected, task bool
+	var last map[string]any
+	sc := bufio.NewScanner(strings.NewReader(stdout))
+	for sc.Scan() {
+		var rec map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+			t.Fatalf("not JSON: %q", sc.Text())
+		}
+		switch {
+		case rec["type"] == "tool_result" && rec["name"] == "task_collect":
+			collected = strings.Contains(rec["output"].(string), "child answer")
+		case rec["type"] == "task":
+			task = rec["id"] == "t1" && rec["background"] == true
+		}
+		last = rec
+	}
+	if !collected || !task || last["text"] != "final" {
+		t.Fatalf("collected %v task %v result %v\n%s", collected, task, last, stdout)
+	}
+	if u := last["usage"].(map[string]any); u["input_tokens"] != float64(27) {
+		t.Fatalf("usage %v leaves out the task", u)
+	}
+
+	_, stderr, code = gilda(t, script, "-p", "go")
+	if code != 0 || !strings.Contains(stderr, `[t1] "look" finished, 1 turn`) {
+		t.Fatalf("exit %d stderr %q", code, stderr)
+	}
+}
+
+func TestTaskModelFlagReachesTheStartRecord(t *testing.T) {
+	stdout, stderr, code := gilda(t, `[{"text":"ok"}]`, "-p", "go", "--json", "--task-model", "small")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	var start map[string]any
+	json.Unmarshal([]byte(strings.SplitN(stdout, "\n", 2)[0]), &start)
+	if start["type"] != "start" || start["task_model"] != "small" {
+		t.Fatalf("start record %v", start)
+	}
+}

@@ -129,6 +129,8 @@ func (a *App) Load(id string) (*SessionInfo, []error, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// The tasks belong to the conversation being left.
+	a.tasks.Reset()
 	a.Agent.Reset()
 	a.Seen.Reset()
 	a.resume(s)

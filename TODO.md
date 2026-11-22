@@ -30,6 +30,15 @@ None open.
   - [x] A REPL `/resume` and `/sessions`.
   - [ ] A session resumed with a different tool set (`--tools`, or a provider that drops `apply_patch`) replays calls to tools the request no longer defines. Unverified whether each API accepts that.
 
+- [x] Background tasks: `task` with `background`, `task_collect`, nesting (`docs/dev/async-tasks.md`).
+  - [x] Live runs on Haiku 5.5, Sonnet 5.5 and GPT-5.5 (`docs/dev/async-tasks.md`, "Measured"): never chosen unasked in 18 runs; driven correctly when asked in 12 of 12.
+  - [x] The description no longer promotes parallel use: background is for delegation the user asks for, or long independent investigations, since delegating cost 4.8-8.3x the input tokens and no model used it unasked.
+  - [x] Brief fidelity: quoting the user's request in each task's prompt gave Haiku 5/6 against 12/18 and was removed; the root redefines the question in its briefs whatever the task sees.
+  - [x] The task model: a Sonnet 5.5 root with Haiku 5.5 tasks passed `fan-out-delegate` 6/6 at $0.0327 a run, against Sonnet alone 3/3 at $0.0927 and Haiku alone 19/27 at under $0.01.
+  - [x] A token budget for the task tree (`[tasks] budget`).
+  - [x] A stopped task starts no notice turn.
+  - [ ] A cancelled request is charged its whole hold against the budget; settle with partial usage where the stream reported some.
+
 - [x] **E3**: `read` on a directory lists its entries.
   - [ ] Add `grep` only if `scripts/tally` shows `bash rg`/`grep` dominate.
 

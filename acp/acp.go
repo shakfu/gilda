@@ -433,6 +433,14 @@ func (s *server) open(p sessionParams, id string) (*session, *rpcError) {
 	}
 	sess := &session{srv: s, app: a, stops: map[int64]context.CancelFunc{}, always: map[permission.Allowance]bool{}, resent: -1}
 	a.SetPermissions("", sess.ask)
+	// The prompt waits for its tasks (see run), and session/update needs the run's state, so
+	// tasks are only logged here; their usage reaches the client with the next response.
+	log := s.opts.Log
+	a.Agent.Tasks.SetSink(func(e agent.Event) {
+		if d, ok := e.(agent.TaskDone); ok {
+			fmt.Fprintf(log, "gilda: task %s %q done after %d turns\n", d.ID, d.Name, d.Turns)
+		}
+	})
 	// Nobody can answer the trust question here, so the session uses ask mode, as -p --json does.
 	if dir, _ := a.Trust(); dir != "" {
 		a.SetPermissions(permission.Ask, a.Ask())
@@ -576,9 +584,11 @@ type session struct {
 	stops map[int64]context.CancelFunc
 	turn  context.Context
 	idle  chan struct{}
-	// always is what allow_always answers allowed, as the REPL's "a" does. Only the prompt's
-	// goroutine reads and writes it.
+	// always is what allow_always answers allowed, as the REPL's "a" does. askMu holds it and
+	// keeps the client to one permission request at a time, since background tasks ask from
+	// their own goroutines.
 	always map[permission.Allowance]bool
+	askMu  sync.Mutex
 	// shown is the round-trip's text the client has seen. After a resend, resent counts the
 	// bytes of shown the new attempt repeated so far; it is -1 otherwise.
 	shown  string
@@ -599,7 +609,9 @@ func (s *session) run(ctx context.Context, text string) (any, *rpcError) {
 		return map[string]string{"stopReason": "cancelled"}, nil
 	}
 	s.shown, s.resent = "", -1
-	res, err := s.app.Agent.Run(ctx, text, s.event)
+	// Drive keeps the prompt open until its background tasks finish: the client cannot be
+	// told of a task between prompts.
+	res, err := agent.Drive(ctx, s.app.Agent, text, s.event)
 	if serr := s.app.Save(); serr != nil {
 		fmt.Fprintln(s.srv.opts.Log, "gilda: warning: session:", serr)
 	}
@@ -781,6 +793,8 @@ func (s *session) watchApprovals() {
 // ask is the permission.AskFunc of a session: it asks the client. Any answer but an allow
 // option, a cancelled request included, refuses the call.
 func (s *session) ask(ctx context.Context, t tool.Tool, call llm.ToolCall, label string, why permission.Reason) (bool, error) {
+	s.askMu.Lock()
+	defer s.askMu.Unlock()
 	need := why.Allowances(call.Name)
 	covered := len(need) > 0
 	for _, a := range need {

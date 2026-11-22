@@ -14,10 +14,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shakfu/gilda/agent"
@@ -65,6 +68,9 @@ type Options struct {
 	Only []string
 	// AppendSystem is added to the end of the system prompt.
 	AppendSystem string
+	// TaskModel, when set, is the model tasks run on: a model of the session's provider, as ID
+	// or PROVIDER:ID. Empty takes tasks.model from settings.toml, then the conversation's model.
+	TaskModel string
 	// Continue resumes the newest session saved for Root; Resume resumes the session with that
 	// id, or a unique prefix of it. Either takes the session's provider and model unless
 	// Provider or Model is set.
@@ -114,6 +120,16 @@ type App struct {
 	// task is tools.task from settings.toml. env is what the built-in tools share.
 	task bool
 	env  tool.Env
+	// tasks is the root of the background task tree; deliver is tasks.deliver.
+	tasks   *agent.Tasks
+	deliver string
+	// taskModel is Options.TaskModel or tasks.model; taskSpec is it resolved by Prepare, read by
+	// build from task goroutines.
+	taskModel string
+	taskSpec  atomic.Pointer[taskSpec]
+	// approver is the mode's approval function. Agent.Approve reads it on each call, so a
+	// SetPermissions reaches running tasks, which copied Agent.Approve when they started.
+	approver atomic.Pointer[approveFunc]
 	// promptOpts says what the system prompt includes, for the trust question.
 	promptOpts prompt.Options
 	notify     string
@@ -238,6 +254,20 @@ func New(opts Options) (*App, error) {
 	}
 	env := tool.Env{Root: opts.Root, Jobs: a.Jobs, Limits: limits, Hide: HiddenEnv(st.BashEnv), Seen: a.Seen}
 	a.applyPatch, a.env, a.task = st.ApplyPatch, env, state.Or(st.Task, true)
+	a.tasks = agent.NewTasks(agent.TaskOptions{
+		Depth:   state.Or(settings.Tasks.Depth, 0),
+		Running: state.Or(settings.Tasks.Running, 0),
+		Budget:  state.Or(settings.Tasks.Budget, 0),
+		Build:   a.build,
+	})
+	a.taskModel = opts.TaskModel
+	if a.taskModel == "" {
+		a.taskModel = settings.Tasks.Model
+	}
+	a.deliver = settings.Tasks.Deliver
+	if a.deliver == "" {
+		a.deliver = "auto"
+	}
 	a.notify = settings.REPL.Notify
 	if a.notify == "" {
 		a.notify = "bell"
@@ -270,7 +300,8 @@ func New(opts Options) (*App, error) {
 		}
 	}
 	a.mode, a.ask, a.rules = mode, opts.Ask, rules
-	cfg.Approve = permission.Approver(mode, opts.Root, opts.Ask, rules...)
+	a.setApprover(permission.Approver(mode, opts.Root, opts.Ask, rules...))
+	cfg.Approve = a.approve
 
 	if opts.Mock != "" {
 		p, err := mock.Load(opts.Mock)
@@ -341,6 +372,12 @@ func (a *App) keepOnly(names []string) error {
 			kept = append(kept, t)
 		}
 	}
+	// Background tasks are read only through task_collect.
+	if tool.Find(kept, "task") != nil && tool.Find(kept, "task_collect") == nil {
+		if t := tool.Find(a.Agent.Tools, "task_collect"); t != nil {
+			kept = append(kept, t)
+		}
+	}
 	if tool.Find(kept, "read") == nil {
 		for _, n := range []string{"edit", "apply_patch"} {
 			if tool.Find(kept, n) != nil {
@@ -382,27 +419,117 @@ func (a *App) insertTool(t tool.Tool) {
 	a.Agent.Tools = append(tools, a.Agent.Tools[n:]...)
 }
 
-// addTask offers the task tool unless settings.toml turns it off.
+// addTask offers task and task_collect unless settings.toml turns them off.
 func (a *App) addTask() error {
 	if !a.task {
 		return nil
 	}
-	a.insertTool(agent.Task{New: a.subagent})
+	a.Agent.Tasks = a.tasks
+	a.insertTool(agent.Task{Tasks: a.tasks})
+	a.insertTool(agent.TaskCollect{Tasks: a.tasks})
 	return tool.Check(a.Agent.Tools)
 }
 
-// subagent builds the agent one task call runs: the caller's provider, model, limits and
-// approvals as they are now, read and bash only, and a read record of its own, so the caller
-// cannot edit a file only the subagent has read.
-func (a *App) subagent() *agent.Agent {
+// build makes the agent one task runs: the starting agent's provider, model, limits and
+// approvals, read and bash, the task tools when sub is set, and a read record of its own, so
+// the caller cannot edit a file only the task has read. Tasks call it from their goroutines, so
+// it reads only parent and fields fixed in New.
+func (a *App) build(parent agent.Config, sub *agent.Tasks) *agent.Agent {
 	env := a.env
 	env.Seen = &tool.Seen{}
-	cfg := a.Agent.Config
-	cfg.System = a.Agent.System + "\n" + agent.TaskPrompt + "\n"
+	cfg := parent
+	if !strings.Contains(cfg.System, agent.TaskPrompt) {
+		cfg.System += "\n" + agent.TaskPrompt + "\n"
+	}
 	cfg.Tools = []tool.Tool{tool.Read{Env: env}, tool.Bash{Env: env}}
-	cfg.SessionID = a.Agent.SessionID + "-task"
+	if sub != nil {
+		cfg.Tools = append(cfg.Tools, agent.Task{Tasks: sub}, agent.TaskCollect{Tasks: sub})
+	}
+	if !strings.HasSuffix(cfg.SessionID, "-task") {
+		cfg.SessionID += "-task"
+	}
+	// The task model belongs to the provider Prepare resolved it for; after a provider switch,
+	// tasks follow the conversation's model.
+	if s := a.taskSpec.Load(); s != nil && s.provider == parent.Provider {
+		// Effort is left to the provider, since the task model may not take the conversation's.
+		cfg.Model, cfg.Context, cfg.Images, cfg.Effort = s.model, s.context, s.images, ""
+	}
 	return agent.New(cfg)
 }
+
+// taskSpec is a task model resolved for one provider.
+type taskSpec struct {
+	provider llm.Provider
+	model    string
+	context  int64
+	images   bool
+}
+
+// prepareTaskModel checks the task model against the provider's list and resolves its window
+// and whether it takes images, as resolveContext does for the conversation's model.
+func (a *App) prepareTaskModel(ctx context.Context) error {
+	id := a.taskModel
+	if id == "" {
+		return nil
+	}
+	if p, m, ok := SplitModel(id); ok {
+		if p != a.ProviderID {
+			return fmt.Errorf("task model %q: tasks use the session's provider, %s", id, a.ProviderID)
+		}
+		id = m
+	}
+	s := taskSpec{provider: a.Agent.Provider, model: id}
+	if a.ProviderID != "mock" {
+		if err := a.checkModel(ctx, a.ProviderID, a.Agent.Provider, id); err != nil {
+			return fmt.Errorf("task model: %w", err)
+		}
+		s.context, s.images = a.contextOf(ctx, id), a.imagesOf(id)
+	}
+	a.taskSpec.Store(&s)
+	return nil
+}
+
+// TaskModel is the model tasks run on now, or empty when they use the conversation's.
+func (a *App) TaskModel() string {
+	if s := a.taskSpec.Load(); s != nil && s.provider == a.Agent.Provider {
+		return s.model
+	}
+	return ""
+}
+
+// taskID matches a task id such as t12.
+var taskID = regexp.MustCompile(`\bt([0-9]+)\b`)
+
+// lastTaskID is the highest task id the history names, in task and task_collect results and in
+// gilda's notices, so a resumed conversation's new tasks do not reuse one.
+func lastTaskID(history []llm.Message) int {
+	names := map[string]string{}
+	most := 0
+	scan := func(s string) {
+		for _, m := range taskID.FindAllStringSubmatch(s, -1) {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				most = max(most, n)
+			}
+		}
+	}
+	for _, m := range history {
+		for _, c := range m.Calls {
+			names[c.ID] = c.Name
+		}
+		for _, r := range m.Results {
+			if n := names[r.CallID]; n == "task" || n == "task_collect" {
+				scan(r.Content)
+			}
+		}
+		if m.Role == llm.User && strings.Contains(m.Text, "[gilda: ") {
+			scan(m.Text)
+		}
+	}
+	return most
+}
+
+// Deliver is tasks.deliver: auto or prompt.
+func (a *App) Deliver() string { return a.deliver }
 
 // resume loads a saved session into the agent; nil does nothing.
 func (a *App) resume(s *session) {
@@ -411,6 +538,7 @@ func (a *App) resume(s *session) {
 	}
 	history, dropped := s.restore()
 	a.Agent.History, a.Agent.Used, a.Agent.SessionID, a.created, a.saved = history, s.Used, s.ID, s.Created, s.Updated
+	a.tasks.After(lastTaskID(history))
 	a.costBase, a.costStart = s.Cost, a.usageCost()
 	if dropped > 0 {
 		a.warns = append(a.warns, fmt.Errorf("session %s: reasoning of %d messages could not be restored; they resume as text", s.ID, dropped))
@@ -419,6 +547,7 @@ func (a *App) resume(s *session) {
 
 // Reset starts a new conversation, saved as a new session. Session usage is kept.
 func (a *App) Reset() {
+	a.tasks.Reset()
 	a.Agent.Reset()
 	a.Seen.Reset()
 	a.Agent.SessionID = newSessionID()
@@ -427,16 +556,24 @@ func (a *App) Reset() {
 }
 
 func (a *App) usageCost() float64 {
-	if c := a.Agent.Usage.Cost; c != nil {
-		return *c
+	u := a.Usage()
+	if u.Cost != nil {
+		return *u.Cost
 	}
 	return 0
+}
+
+// Usage totals the session: the agent's own usage and that of its finished background tasks.
+func (a *App) Usage() llm.Usage {
+	u := a.Agent.Usage
+	u.Add(a.tasks.Usage())
+	return u
 }
 
 // SessionCost is the USD cost of the current conversation, including the runs it was resumed
 // from; nil when no cost is known.
 func (a *App) SessionCost() *float64 {
-	if a.costBase == nil && a.Agent.Usage.Cost == nil {
+	if a.costBase == nil && a.Usage().Cost == nil {
 		return nil
 	}
 	c := a.usageCost() - a.costStart
@@ -453,7 +590,7 @@ func (a *App) Prepare(ctx context.Context) ([]error, error) {
 	warns := a.warns
 	a.warns = nil
 	if a.ProviderID == "mock" {
-		return warns, nil
+		return warns, a.prepareTaskModel(ctx)
 	}
 	e, _ := provider.Find(a.ProviderID)
 	if a.Agent.Model == "" {
@@ -476,7 +613,7 @@ func (a *App) Prepare(ctx context.Context) ([]error, error) {
 		}
 	}
 	a.resolveContext(ctx)
-	return warns, nil
+	return warns, a.prepareTaskModel(ctx)
 }
 
 // loadPrices fetches the price list once per session, unless settings.toml turns it off.
@@ -500,32 +637,39 @@ func (a *App) loadPrices(ctx context.Context) error {
 // resolveContext sets the window from the provider's listing, then OpenRouter's, and whether
 // the model accepts images.
 func (a *App) resolveContext(ctx context.Context) {
-	a.Agent.Images = a.acceptsImages()
-	if a.fixedCtx {
-		return
+	a.Agent.Images = a.imagesOf(a.Agent.Model)
+	if !a.fixedCtx {
+		a.Agent.Context = a.contextOf(ctx, a.Agent.Model)
 	}
-	a.Agent.Context = 0
+}
+
+// contextOf is a model's window: --context when given, else from the provider's list, then the
+// price list; 0 when unknown.
+func (a *App) contextOf(ctx context.Context, model string) int64 {
+	if a.fixedCtx {
+		return a.Agent.Context
+	}
 	if models, err := a.Models(ctx); err == nil {
 		for _, m := range models {
-			if m.ID == a.Agent.Model && m.Context > 0 {
-				a.Agent.Context = m.Context
-				return
+			if m.ID == model && m.Context > 0 {
+				return m.Context
 			}
 		}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if e, ok := a.prices.Lookup(a.ProviderID, a.Agent.Model); ok {
-		a.Agent.Context = e.Context
+	if e, ok := a.prices.Lookup(a.ProviderID, model); ok {
+		return e.Context
 	}
+	return 0
 }
 
-// acceptsImages reports whether the current model takes images, from OpenRouter's list. A model
+// imagesOf reports whether a model takes images, from OpenRouter's list. A model
 // the list does not name is taken to accept them on the vendor APIs, whose chat models do, and
 // not elsewhere: a local server or an unknown OpenRouter model would reject every later request.
-func (a *App) acceptsImages() bool {
+func (a *App) imagesOf(model string) bool {
 	a.mu.Lock()
-	e, listed := a.prices.Lookup(a.ProviderID, a.Agent.Model)
+	e, listed := a.prices.Lookup(a.ProviderID, model)
 	a.mu.Unlock()
 	if ok, known := e.Images(); listed && known {
 		return ok
@@ -739,7 +883,16 @@ func (a *App) SetPermissions(mode permission.Mode, ask permission.AskFunc) {
 		a.mode = mode
 	}
 	a.ask = ask
-	a.Agent.Approve = permission.Approver(a.mode, a.opts.Root, ask, a.rules...)
+	a.setApprover(permission.Approver(a.mode, a.opts.Root, ask, a.rules...))
+}
+
+type approveFunc = func(context.Context, tool.Tool, llm.ToolCall, string) (bool, error)
+
+func (a *App) setApprover(f approveFunc) { a.approver.Store(&f) }
+
+// approve asks the current mode's approver.
+func (a *App) approve(ctx context.Context, t tool.Tool, call llm.ToolCall, label string) (bool, error) {
+	return (*a.approver.Load())(ctx, t, call, label)
 }
 
 // Rules are the layers in force beyond the built-in one: the user's settings, then the app's.
@@ -748,8 +901,11 @@ func (a *App) Rules() permission.Layers { return a.rules }
 // Ask is how calls that need approval currently ask.
 func (a *App) Ask() permission.AskFunc { return a.ask }
 
-// Close stops background jobs left by bash.
-func (a *App) Close() { a.Jobs.Kill() }
+// Close stops background tasks, then the processes bash left running.
+func (a *App) Close() {
+	a.tasks.Close()
+	a.Jobs.Kill()
+}
 
 func (a *App) defaultModel(id, model string) string {
 	if model != "" {

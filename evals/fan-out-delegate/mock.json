@@ -1,0 +1,113 @@
+[
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "calls": [
+   {
+    "name": "task",
+    "arguments": {
+     "prompt": "Find the runtime retry limit of services/billing.",
+     "background": true,
+     "name": "billing"
+    }
+   },
+   {
+    "name": "task",
+    "arguments": {
+     "prompt": "Find the runtime retry limit of services/auth.",
+     "background": true,
+     "name": "auth"
+    }
+   },
+   {
+    "name": "task",
+    "arguments": {
+     "prompt": "Find the runtime retry limit of services/search.",
+     "background": true,
+     "name": "search"
+    }
+   },
+   {
+    "name": "task",
+    "arguments": {
+     "prompt": "Find the runtime retry limit of services/mail.",
+     "background": true,
+     "name": "mail"
+    }
+   },
+   {
+    "name": "task_collect",
+    "arguments": {
+     "ids": [
+      "t1"
+     ],
+     "wait": 60
+    }
+   },
+   {
+    "name": "task_collect",
+    "arguments": {
+     "ids": [
+      "t2"
+     ],
+     "wait": 60
+    }
+   },
+   {
+    "name": "task_collect",
+    "arguments": {
+     "ids": [
+      "t3"
+     ],
+     "wait": 60
+    }
+   },
+   {
+    "name": "task_collect",
+    "arguments": {
+     "ids": [
+      "t4"
+     ],
+     "wait": 60
+    }
+   }
+  ]
+ },
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "text": "found it"
+ },
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "text": "found it"
+ },
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "text": "found it"
+ },
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "text": "found it"
+ },
+ {
+  "usage": {
+   "input_tokens": 100,
+   "output_tokens": 10
+  },
+  "text": "billing=7 auth=4 search=9 mail=6"
+ }
+]

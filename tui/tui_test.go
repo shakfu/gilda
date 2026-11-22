@@ -466,6 +466,8 @@ func drain(t *testing.T, m *model) {
 		select {
 		case msg := <-m.events:
 			m.Update(msg)
+		case msg := <-m.bg:
+			m.Update(msg)
 		case <-time.After(5 * time.Second):
 			t.Fatal("the run did not end")
 		}

@@ -42,6 +42,8 @@ func TestToolName(t *testing.T) {
 		{"bash", "$ go test ./... | tail", "bash go+tail"},
 		{"bash", "[task] $ rg foo", "task>bash rg"},
 		{"read", "[task] read a.go", "task>read"},
+		{"task", "task & find callers", "task background"},
+		{"task", "task find callers", "task"},
 	} {
 		if got := ToolName(c[0], c[1]); got != c[2] {
 			t.Errorf("ToolName(%q, %q) = %q, want %q", c[0], c[1], got, c[2])

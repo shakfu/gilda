@@ -15,7 +15,8 @@
 // commits the files to a git repository and then leaves a change uncommitted. context passes
 // --context, so a task can reach elision without filling a large window. The check is a shell
 // command run in the scratch directory once gilda exits; exit 0 is a pass.
-// GILDA_ANSWER names a file holding the run's final text, for tasks that ask a question.
+// GILDA_ANSWER names a file holding the run's final text, for tasks that ask a question, and
+// GILDA_RECORDS the run's --json records, for tasks that check how the run worked.
 //
 // The report gives, per task, the pass rate; "checked", the runs that ran bash after their last
 // file change out of those that changed a file; the runs that elided old tool results; and
@@ -94,9 +95,23 @@ type outcome struct {
 	recorded bool
 }
 
+// build compiles gilda from ./cmd/gilda into a new temporary directory.
+func build() (string, error) {
+	dir, err := os.MkdirTemp("", "gilda-eval-bin-")
+	if err != nil {
+		return "", err
+	}
+	bin := filepath.Join(dir, "gilda")
+	if out, err := exec.Command("go", "build", "-o", bin, "./cmd/gilda").CombinedOutput(); err != nil {
+		os.RemoveAll(dir)
+		return "", fmt.Errorf("building gilda: %v\n%s", err, out)
+	}
+	return bin, nil
+}
+
 func main() {
 	var o options
-	flag.StringVar(&o.bin, "bin", "bin/gilda", "the gilda binary")
+	flag.StringVar(&o.bin, "bin", "", "the gilda binary (default: built from ./cmd/gilda for this run)")
 	flag.StringVar(&o.model, "m", "", "model, or PROVIDER:MODEL, passed to gilda -m")
 	flag.StringVar(&o.settings, "settings", "", "a settings.toml for every run, for A/B comparisons")
 	flag.StringVar(&o.out, "out", "", "directory for each run's JSON lines and results.json (default: evals/results/TIME)")
@@ -121,9 +136,23 @@ func main() {
 		}
 		tasks = append(tasks, t)
 	}
+	built := "" // the directory build made, removed on exit; never a -bin directory
+	if o.bin == "" {
+		// A prebuilt bin/gilda can predate the source being measured; building each time cannot.
+		bin, err := build()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		built, o.bin = filepath.Dir(bin), bin
+		defer os.RemoveAll(built)
+	}
 	results, err := runAll(context.Background(), tasks, o, os.Stderr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		if built != "" {
+			os.RemoveAll(built)
+		}
 		os.Exit(1)
 	}
 	report(os.Stdout, results)
@@ -252,7 +281,11 @@ func runOnce(ctx context.Context, t task, i int, o options) (outcome, error) {
 	defer ccancel()
 	check := exec.CommandContext(cctx, "sh", "-c", t.Check)
 	check.Dir = work
-	check.Env = append(env(home), "GILDA_ANSWER="+answer)
+	records, err := filepath.Abs(jsonl)
+	if err != nil {
+		return r, err
+	}
+	check.Env = append(env(home), "GILDA_ANSWER="+answer, "GILDA_RECORDS="+records)
 	out, err := check.CombinedOutput()
 	r.Pass = err == nil
 	if !r.Pass {
@@ -273,6 +306,7 @@ func (r *outcome) read(jsonl string) string {
 			Type    string `json:"type"`
 			Name    string `json:"name"`
 			Label   string `json:"label"`
+			Task    string `json:"task"` // set on records from inside a background task
 			OK      bool   `json:"ok"`
 			Outcome string `json:"outcome"`
 			Error   string `json:"error"`
@@ -291,6 +325,14 @@ func (r *outcome) read(jsonl string) string {
 		var cost float64
 		if rec.Usage.Cost != nil {
 			cost = *rec.Usage.Cost
+		}
+		// A background task's calls are its own, as a synchronous task's [task] calls are; its
+		// nested task records are already in the task record that follows.
+		if rec.Task != "" {
+			rec.Label = "[task] " + rec.Label
+			if rec.Type == "task" {
+				continue
+			}
 		}
 		switch rec.Type {
 		case "tool_result":
@@ -419,7 +461,7 @@ func report(w io.Writer, results []outcome) {
 	row := func(name string, a *agg) {
 		n := float64(a.runs)
 		fmt.Fprintf(tw, "%s\t%d/%d\t%d/%d\t%d\t%.1f\t%.1f\t%.0f\t%.0f\t$%.4f\t%.0f\t\n", name, a.passes, a.runs,
-			a.checked, a.edited, a.elided, float64(a.turns)/n, float64(a.failed)/n, float64(a.in)/n, float64(a.out)/n, a.cost, a.secs/n)
+			a.checked, a.edited, a.elided, float64(a.turns)/n, float64(a.failed)/n, float64(a.in)/n, float64(a.out)/n, a.cost/n, a.secs/n)
 	}
 	for _, name := range names {
 		row(name, byTask[name])

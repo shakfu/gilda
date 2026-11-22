@@ -106,9 +106,11 @@ func fakeGilda(t *testing.T, out, then string) string {
 }
 
 // A run killed by the timeout still reports the turns and tokens it used, its subagent's included.
+// A task record inside a task is already in the outer one, so it is not added again.
 func TestAKilledRunCountsItsTurns(t *testing.T) {
 	out := `{"type":"start","model":"m"}
 {"type":"turn","usage":{"input_tokens":100,"output_tokens":10,"cost":0.5}}
+{"type":"task","task":"t1","turns":1,"usage":{"input_tokens":40,"output_tokens":4}}
 {"type":"task","turns":3,"usage":{"input_tokens":50,"output_tokens":5,"cost":0.25}}
 {"type":"turn","usage":{"input_tokens":200,"output_tokens":20,"cost":null}}`
 	bin := fakeGilda(t, out, "exec sleep 30")
@@ -144,10 +146,12 @@ func TestARunIsCheckedByBashAfterItsLastChange(t *testing.T) {
 {"type":"tool_result","name":"bash","label":"$ go test ./... | tail","ok":false}
 {"type":"tool_result","name":"edit","label":"edit a.go","ok":true}
 {"type":"tool_result","name":"bash","label":"[task] $ rg x","ok":true}
+{"type":"tool_result","name":"bash","label":"$ rg y","ok":true,"task":"t1"}
 {"type":"tool_result","name":"edit","label":"edit b.go","ok":false}`
 	var r outcome
 	r.read(out)
-	want := map[string]int{"read": 1, "edit": 3, "bash go+tail": 1, "task>bash rg": 1}
+	// A background task's bash, marked by its task field, is not the run checking its edit.
+	want := map[string]int{"read": 1, "edit": 3, "bash go+tail": 1, "task>bash rg": 2}
 	if !r.Edited || r.Checked || r.Failed != 2 || len(r.Tools) != len(want) {
 		t.Fatalf("%+v", r)
 	}
@@ -164,6 +168,50 @@ func TestARunIsCheckedByBashAfterItsLastChange(t *testing.T) {
 	r.Task, r.Run = "t", 1
 	report(&b, []outcome{r})
 	if !strings.Contains(b.String(), "1/1") || !strings.Contains(b.String(), "task>bash rg") {
+		t.Fatalf("report:\n%s", b.String())
+	}
+}
+
+// fan-out-delegate's records check needs four background tasks started by the conversation and
+// every one collected; a task's own calls do not count.
+func TestDelegateCheckNeedsFourCollectedTasks(t *testing.T) {
+	start := func(id string) string {
+		return `{"type":"tool_result","name":"task","label":"task & x","ok":true,"output":"started ` + id + ` \"x\" in the background"}`
+	}
+	collect := func(ids ...string) string {
+		var out []string
+		for _, id := range ids {
+			out = append(out, id+` \"x\" finished, 1 turn:\nanswer`)
+		}
+		return `{"type":"tool_result","name":"task_collect","label":"task_collect","ok":true,"output":"` + strings.Join(out, `\n\n`) + `"}`
+	}
+	nested := `{"type":"tool_result","name":"task","label":"task & y","ok":true,"output":"started t9 \"y\" in the background","task":"t1"}`
+	cases := []struct {
+		records []string
+		pass    bool
+	}{
+		{[]string{start("t1"), start("t2"), start("t3"), start("t4"), collect("t1", "t2"), collect("t3", "t4")}, true},
+		{[]string{start("t1"), start("t2"), start("t3"), nested, collect("t1", "t2", "t3")}, false},
+		{[]string{start("t1"), start("t2"), start("t3"), start("t4"), collect("t1", "t2", "t3")}, false},
+	}
+	for i, c := range cases {
+		f := filepath.Join(t.TempDir(), "r.jsonl")
+		os.WriteFile(f, []byte(strings.Join(c.records, "\n")+"\n"), 0o644)
+		cmd := exec.Command("go", "run", "verify_records.go")
+		cmd.Dir = "../../evals/fan-out-delegate/check"
+		cmd.Env = append(os.Environ(), "GILDA_RECORDS="+f)
+		out, err := cmd.CombinedOutput()
+		if (err == nil) != c.pass {
+			t.Errorf("case %d: pass %v, want %v: %s", i, err == nil, c.pass, out)
+		}
+	}
+}
+
+// Every column but pass and checked is a mean per run, cost included.
+func TestReportCostIsPerRun(t *testing.T) {
+	var b strings.Builder
+	report(&b, []outcome{{Task: "t", Run: 1, Cost: 0.30}, {Task: "t", Run: 2, Cost: 0.10}})
+	if !strings.Contains(b.String(), "$0.2000") {
 		t.Fatalf("report:\n%s", b.String())
 	}
 }

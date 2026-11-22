@@ -29,6 +29,7 @@ var commands = []command{
 	{"/sessions", "", "list the conversations saved for this directory"},
 	{"/resume", "[id]", "continue a saved conversation; without an id, pick one"},
 	{"/cost", "", "session tokens and cost"},
+	{"/tasks", "[cancel id]", "list background tasks, or stop one"},
 	{"/copy", "", "copy the last answer to the clipboard"},
 	{"/help", "", "list commands and keys"},
 	{"/exit", "", "leave; so do /quit, Ctrl-D, and Ctrl-C on an empty line"},
@@ -52,7 +53,9 @@ func (m *model) command(text string) tea.Cmd {
 	}
 	switch name {
 	case "/exit", "/quit":
-		return tea.Quit
+		return m.quit()
+	case "/tasks":
+		m.tasksCommand(arg)
 	case "/help":
 		for _, c := range commands {
 			m.out("  " + m.st.Accent.Render(fmt.Sprintf("%-13s", c.name)) + m.st.Dim.Render(fmt.Sprintf("%-9s", c.args)) + c.help)
@@ -70,7 +73,7 @@ func (m *model) command(text string) tea.Cmd {
 	case "/clear":
 		m.app.Reset()
 		m.used = 0
-		clear(m.always)
+		m.forget()
 		m.out(m.st.Dim.Render("new conversation"))
 	case "/sessions":
 		list, err := app.Sessions(m.app.State.Dir(), m.app.Root())
@@ -118,7 +121,7 @@ func (m *model) command(text string) tea.Cmd {
 				return nil
 			}
 			m.app.SetPermissions(mode, m.app.Ask())
-			clear(m.always)
+			m.forget()
 			m.out(m.st.Dim.Render("permissions " + string(mode)))
 			return nil
 		}
@@ -178,7 +181,7 @@ func (m *model) resume(id string) tea.Cmd {
 		m.out(m.st.Error.Render("error: " + err.Error()))
 		return nil
 	}
-	clear(m.always)
+	m.forget()
 	m.herdrReport("idle", "")
 	m.resumedLines()
 	for _, w := range warns {
@@ -420,4 +423,32 @@ func orDefault(s string) string {
 		return "default"
 	}
 	return s
+}
+
+// tasksCommand lists the conversation's background tasks, or cancels one.
+func (m *model) tasksCommand(arg string) {
+	tasks := m.app.Agent.Tasks
+	if id, ok := strings.CutPrefix(arg, "cancel"); ok && arg != "" {
+		id = strings.TrimSpace(id)
+		if err := tasks.Cancel(id); err != nil {
+			m.out(m.st.Error.Render("error: " + err.Error()))
+			return
+		}
+		m.out(m.st.Dim.Render("cancelling " + id))
+		return
+	}
+	if arg != "" {
+		m.out(m.st.Error.Render("usage: /tasks, or /tasks cancel ID"))
+		return
+	}
+	list := tasks.List()
+	if len(list) == 0 {
+		m.out(m.st.Dim.Render("no background tasks"))
+	}
+	for _, h := range list {
+		m.out("  " + h.Status())
+	}
+	if spent, limit := tasks.Budget(); limit > 0 {
+		m.out(m.st.Dim.Render(fmt.Sprintf("  budget: %s of %s tokens spent", shortTokens(spent), shortTokens(limit))))
+	}
 }

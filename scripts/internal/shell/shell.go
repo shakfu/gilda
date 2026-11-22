@@ -16,6 +16,9 @@ func ToolName(name, label string) string {
 	if rest, ok := strings.CutPrefix(label, "[task] "); ok {
 		prefix, label = "task>", rest
 	}
+	if name == "task" && strings.HasPrefix(label, "task & ") {
+		return prefix + "task background"
+	}
 	if name != "bash" {
 		return prefix + name
 	}

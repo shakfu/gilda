@@ -131,6 +131,8 @@ func main() {
 	fl.BoolVar(&f.noColor, "no-color", false, "disable colour; also off when NO_COLOR is set")
 	fl.StringSliceVar(&f.Only, "tools", nil, "offer only these tool `NAMES`, such as read,bash (default: all)")
 	fl.StringVar(&f.AppendSystem, "append-system", "", "add `TEXT` to the end of the system prompt")
+	fl.StringVar(&f.TaskModel, "task-model", "", "run task subagents on model `ID` of the same provider "+
+		"(default: settings.toml, else the conversation's model)")
 	fl.BoolVarP(&f.Continue, "continue", "c", false, "resume the newest session saved for the working directory")
 	fl.StringVar(&f.Resume, "resume", "", "resume the session with this `ID`, or a unique prefix of it")
 	fl.BoolVar(&f.sessions, "sessions", false, "list the sessions saved for the working directory and exit")

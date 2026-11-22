@@ -64,6 +64,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request, emit func(llm.Ev
 	}
 	s := p.steps[0]
 	p.steps = p.steps[1:]
+	n := len(p.Requests)
 	p.mu.Unlock()
 
 	if err := ctx.Err(); err != nil {
@@ -92,7 +93,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request, emit func(llm.Ev
 		if args == "" {
 			args = "{}"
 		}
-		msg.Calls = append(msg.Calls, llm.ToolCall{ID: fmt.Sprintf("mock_%d_%d", len(p.Requests), i), Name: c.Name, Arguments: args})
+		msg.Calls = append(msg.Calls, llm.ToolCall{ID: fmt.Sprintf("mock_%d_%d", n, i), Name: c.Name, Arguments: args})
 	}
 	stop := s.Stop
 	if stop == "" {

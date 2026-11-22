@@ -1,0 +1,2 @@
+prompt = "This repository has four independent services under services/: billing, auth, search and mail. For each, find the most times its client retries one request at runtime. Answer on one line in exactly this form: billing=N auth=N search=N mail=N"
+check = 'grep -q "billing=7 auth=4 search=9 mail=6" "$GILDA_ANSWER"'

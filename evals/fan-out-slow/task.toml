@@ -1,0 +1,4 @@
+prompt = "Each of four services, billing, auth, search and mail, reports its live retry limit only through ./probe SERVICE, which takes about 20 seconds per call. Get all four values and answer on one line in exactly this form: billing=N auth=N search=N mail=N"
+# The probe's source is removed, so the values come from running it.
+setup = "go build -o probe ./cmd/probe && rm -rf cmd"
+check = 'grep -q "billing=9 auth=4 search=8 mail=5" "$GILDA_ANSWER"'

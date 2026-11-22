@@ -3,7 +3,8 @@ package agent
 import "encoding/json"
 
 // Record maps an event to a JSON-ready record with a "type" field: text, reasoning,
-// tool_start, tool_call, tool_result, retry, elided, task or turn. An error becomes its message, since
+// tool_start, tool_call, tool_result, retry, elided, task or turn; an event inside a task
+// adds a task field naming it. An error becomes its message, since
 // error values marshal as {}. The CLI's --json output prints all but text, reasoning and
 // tool_start.
 func Record(e Event) map[string]any {
@@ -31,7 +32,18 @@ func Record(e Event) map[string]any {
 	case Elided:
 		return map[string]any{"type": "elided", "results": e.Results, "bytes": e.Bytes}
 	case TaskDone:
-		return map[string]any{"type": "task", "turns": e.Turns, "usage": e.Usage}
+		rec := map[string]any{"type": "task", "id": e.ID, "name": e.Name, "background": e.Background,
+			"turns": e.Turns, "usage": e.Usage}
+		if e.Err != nil {
+			rec["error"] = e.Err.Error()
+		}
+		return rec
+	case TaskEvent:
+		rec := Record(e.Event)
+		if rec != nil {
+			rec["task"] = e.ID
+		}
+		return rec
 	}
 	return nil
 }

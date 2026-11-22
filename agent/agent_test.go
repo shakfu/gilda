@@ -563,9 +563,9 @@ func TestTaskRunsASubagent(t *testing.T) {
 		mock.Step{Calls: []mock.Call{call("read", map[string]string{"path": "a.go"})}, Usage: usage(50, 5, 0.01)},
 		mock.Step{Text: "Needle is defined at a.go:51.", Usage: usage(80, 10, 0.02)},
 	)
-	task := Task{New: func() *Agent {
+	task := Task{Tasks: tree1(func() *Agent {
 		return New(Config{Provider: child, Model: "m", Tools: []tool.Tool{tool.Read{Env: tool.Env{Root: root}}}})
-	}}
+	})}
 	parent := mock.New(
 		mock.Step{Calls: []mock.Call{call("task", map[string]string{"prompt": "find Needle"})}, Usage: usage(100, 5, 0.1)},
 		mock.Step{Text: "It is in a.go.", Usage: usage(120, 5, 0.1)},
@@ -607,9 +607,9 @@ func TestTaskRunsASubagent(t *testing.T) {
 
 func TestATaskThatStopsEarlyReportsWhatItHas(t *testing.T) {
 	child := mock.New(mock.Step{Text: "partial", Calls: []mock.Call{call("read", map[string]string{"path": "x"})}})
-	task := Task{New: func() *Agent {
+	task := Task{Tasks: tree1(func() *Agent {
 		return New(Config{Provider: child, Model: "m", MaxTurns: 1, Tools: tool.Default(tool.Env{Root: t.TempDir()})})
-	}}
+	})}
 	out, err := task.Run(context.Background(), json.RawMessage(`{"prompt":"go"}`))
 	if err != nil || !out.Failed || !strings.Contains(out.Output, "partial") || !strings.Contains(out.Output, "stopped early") {
 		t.Fatalf("%+v %v", out, err)
@@ -636,9 +636,9 @@ func TestGeneratedCallIDsDifferBetweenATaskAndItsCaller(t *testing.T) {
 	root := t.TempDir()
 	os.WriteFile(filepath.Join(root, "a"), []byte("x"), 0o644)
 	child := noIDs{mock.New(mock.Step{Calls: []mock.Call{call("read", map[string]string{"path": "a"})}}, mock.Step{Text: "found"})}
-	task := Task{New: func() *Agent {
+	task := Task{Tasks: tree1(func() *Agent {
 		return New(Config{Provider: child, Model: "m", Tools: []tool.Tool{tool.Read{Env: tool.Env{Root: root}}}})
-	}}
+	})}
 	parent := noIDs{mock.New(mock.Step{Calls: []mock.Call{call("task", map[string]string{"prompt": "find"})}}, mock.Step{Text: "done"})}
 	a := New(Config{Provider: parent, Model: "m", Tools: []tool.Tool{task}})
 	var ids []string

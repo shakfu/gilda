@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -208,6 +210,36 @@ func RetryLine(r agent.Retry) string {
 	return line
 }
 
+// Untag returns the event inside a TaskEvent with its label marked by the task's id, as a
+// synchronous task's are marked [task]. A TaskDone inside is for display: its usage is already
+// in its parent task's.
+func Untag(e agent.TaskEvent) agent.Event {
+	tag := "[" + e.ID + "] "
+	switch in := e.Event.(type) {
+	case agent.ToolCall:
+		in.Label = tag + in.Label
+		return in
+	case agent.ToolResult:
+		in.Label = tag + in.Label
+		return in
+	}
+	return e.Event
+}
+
+// TaskLine reports a finished task.
+func TaskLine(d agent.TaskDone) string {
+	line := fmt.Sprintf("[%s] %q ", d.ID, d.Name)
+	switch {
+	case errors.Is(d.Err, context.Canceled):
+		return line + "cancelled"
+	case d.Err != nil:
+		return line + "failed: " + oneLine(firstLine(d.Err.Error()))
+	case d.Turns == 1:
+		return line + "finished, 1 turn"
+	}
+	return line + fmt.Sprintf("finished, %d turns", d.Turns)
+}
+
 // ElidedLine reports old tool results replaced by stubs to free context.
 func ElidedLine(e agent.Elided) string {
 	return fmt.Sprintf("[context] elided %d old tool results (%d KiB) to free context", e.Results, (e.Bytes+1023)/1024)
@@ -215,7 +247,7 @@ func ElidedLine(e agent.Elided) string {
 
 // UsageLine summarises a prompt: context used, tokens in and out, cost.
 func UsageLine(a *app.App, u llm.Usage) string {
-	return usageLine(a.Agent.Used, a.Agent.Context, u, a.Agent.Usage)
+	return usageLine(a.Agent.Used, a.Agent.Context, u, a.Usage())
 }
 
 func usageLine(used, window int64, u, session llm.Usage) string {
@@ -283,4 +315,11 @@ func oneLine(s string) string {
 		return s[:i] + " ..."
 	}
 	return s
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }

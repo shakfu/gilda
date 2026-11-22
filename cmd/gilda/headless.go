@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 
 	"github.com/shakfu/gilda/agent"
 	"github.com/shakfu/gilda/app"
@@ -79,19 +80,33 @@ func headless(parent context.Context, a *app.App, prompt string, asJSON, color b
 	var j *jsonOut
 	if asJSON {
 		j = &jsonOut{w: os.Stdout}
-		j.write(map[string]any{"type": "start", "provider": a.ProviderID, "model": a.Agent.Model,
-			"session_id": a.Agent.SessionID, "context_window": a.Agent.Context})
+		start := map[string]any{"type": "start", "provider": a.ProviderID, "model": a.Agent.Model,
+			"session_id": a.Agent.SessionID, "context_window": a.Agent.Context}
+		if tm := a.TaskModel(); tm != "" {
+			start["task_model"] = tm
+		}
+		j.write(start)
 		emit = j.event
 	} else {
 		emit = textEvents(os.Stdout, diag, st)
 	}
 
-	res, err := a.Agent.Run(ctx, prompt, func(e agent.Event) {
+	// Background tasks report from their own goroutines.
+	var mu sync.Mutex
+	locked := func(e agent.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		emit(e)
+	}
+	a.Agent.Tasks.SetSink(locked)
+	defer a.Agent.Tasks.SetSink(nil)
+	res, err := agent.Drive(ctx, a.Agent, prompt, func(e agent.Event) {
 		if _, ok := e.(agent.Response); ok {
 			a.Remember()
 		}
-		emit(e)
+		locked(e)
 	})
+	res.Usage.Add(a.Agent.Tasks.Usage())
 	cancelled := errors.Is(err, context.Canceled) || ctx.Err() != nil
 	if serr := a.Save(); serr != nil && !asJSON {
 		fmt.Fprintln(os.Stderr, "gilda: warning: session:", serr)
@@ -142,6 +157,19 @@ func textEvents(out, diag io.Writer, st tui.Styles) func(agent.Event) {
 			fmt.Fprintln(diag, st.Warn.Render(tui.RetryLine(e)))
 		case agent.Elided:
 			fmt.Fprintln(diag, st.Dim.Render(tui.ElidedLine(e)))
+		case agent.TaskDone:
+			if e.Background {
+				fmt.Fprintln(diag, st.Dim.Render(tui.TaskLine(e)))
+			}
+		case agent.TaskEvent:
+			switch in := tui.Untag(e).(type) {
+			case agent.ToolResult:
+				fmt.Fprintln(diag, tui.ToolLine(st, in, 0))
+			case agent.Retry:
+				fmt.Fprintln(diag, st.Warn.Render("["+e.ID+"] "+tui.RetryLine(in)))
+			case agent.TaskDone:
+				fmt.Fprintln(diag, st.Dim.Render(tui.TaskLine(in)))
+			}
 		}
 	}
 }
@@ -163,9 +191,14 @@ func (j *jsonOut) write(v any) {
 // event prints the records a caller needs to follow a run. Text arrives whole in turn records,
 // so its deltas are not printed.
 func (j *jsonOut) event(e agent.Event) {
-	switch e.(type) {
+	switch e := e.(type) {
 	case agent.ToolCall, agent.ToolResult, agent.Retry, agent.Response, agent.Elided, agent.TaskDone:
 		j.write(agent.Record(e))
+	case agent.TaskEvent:
+		switch e.Event.(type) {
+		case agent.ToolCall, agent.ToolResult, agent.Retry, agent.TaskDone:
+			j.write(agent.Record(e))
+		}
 	}
 }
 
@@ -198,7 +231,11 @@ func writeFailure(w io.Writer, err error) int {
 // and stderr are redirected. It shows the call and its preview as the REPL does. With no
 // terminal the call is refused.
 func ttyAsk(preview func(tool.Tool, llm.ToolCall) string, color bool) permission.AskFunc {
+	// Background tasks ask from their own goroutines; one question at a time holds the terminal.
+	var mu sync.Mutex
 	return func(ctx context.Context, t tool.Tool, call llm.ToolCall, label string, _ permission.Reason) (bool, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 		if err != nil {
 			return false, errors.New("refused: approval needs a terminal, and there is none")

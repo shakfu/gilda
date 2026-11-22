@@ -13,7 +13,9 @@ import (
 
 	"github.com/OpenRouterTeam/go-sdk/models/components"
 
+	"github.com/shakfu/gilda/agent"
 	"github.com/shakfu/gilda/llm"
+	"github.com/shakfu/gilda/llm/mock"
 	"github.com/shakfu/gilda/permission"
 	"github.com/shakfu/gilda/price"
 	"github.com/shakfu/gilda/state"
@@ -611,7 +613,7 @@ func TestImagesFollowTheModelList(t *testing.T) {
 	}
 	for _, c := range cases {
 		a.ProviderID, a.Agent.Model = c.provider, c.model
-		if got := a.acceptsImages(); got != c.want {
+		if got := a.imagesOf(a.Agent.Model); got != c.want {
 			t.Errorf("%s %s: %v", c.provider, c.model, got)
 		}
 	}
@@ -713,7 +715,7 @@ func TestTaskBuildsAReadOnlySubagent(t *testing.T) {
 	if tool.Find(a.Agent.Tools, "task") == nil {
 		t.Fatal("no task tool")
 	}
-	sub := a.subagent()
+	sub := a.build(a.Agent.Config, nil)
 	var names []string
 	for _, tl := range sub.Tools {
 		names = append(names, tl.Spec().Name)
@@ -735,5 +737,117 @@ func TestTaskBuildsAReadOnlySubagent(t *testing.T) {
 	b, err := New(Options{Mock: filepath.Join(root, "m.json"), Root: root, ConfigDir: cfg})
 	if err != nil || tool.Find(b.Agent.Tools, "task") != nil {
 		t.Fatalf("task = false kept the tool: %v", err)
+	}
+}
+
+// A task's agent gets the task tools only while depth allows, and --tools keeps task_collect
+// with task.
+func TestTaskToolsFollowDepthAndTheToolFilter(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "m.json"), []byte(`[{"text":"ok"}]`), 0o600)
+	a, err := New(Options{Mock: filepath.Join(root, "m.json"), Root: root, ConfigDir: t.TempDir(), Only: []string{"read", "task"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	var names []string
+	for _, tl := range a.Agent.Tools {
+		names = append(names, tl.Spec().Name)
+	}
+	if strings.Join(names, ",") != "read,task,task_collect" || a.Agent.Tasks == nil {
+		t.Fatalf("tools %v", names)
+	}
+	sub := agent.NewTasks(agent.TaskOptions{})
+	child := a.build(a.Agent.Config, sub)
+	names = nil
+	for _, tl := range child.Tools {
+		names = append(names, tl.Spec().Name)
+	}
+	if strings.Join(names, ",") != "read,bash,task,task_collect" {
+		t.Fatalf("child tools %v", names)
+	}
+	// A task's own task does not repeat the subtask prompt or the session suffix.
+	grand := a.build(child.Config, nil)
+	if strings.Count(grand.System, agent.TaskPrompt) != 1 || strings.Count(grand.SessionID, "-task") != 1 {
+		t.Fatalf("grandchild system or session id repeated: %q", grand.SessionID)
+	}
+}
+
+func TestLastTaskIDReadsTaskResultsAndNotices(t *testing.T) {
+	h := []llm.Message{
+		{Role: llm.User, Text: "use t99 as a name"}, // the user's text is not gilda's
+		{Role: llm.Assistant, Calls: []llm.ToolCall{{ID: "a", Name: "task"}, {ID: "b", Name: "bash"}}},
+		{Role: llm.Tool, Results: []llm.ToolResult{{CallID: "a", Content: `started t3 "x" in the background`}, {CallID: "b", Content: "t50"}}},
+		{Role: llm.User, Text: `[gilda: t4 "y" finished, 1 turn; read the answers with task_collect]`},
+	}
+	if n := lastTaskID(h); n != 4 {
+		t.Fatalf("got %d", n)
+	}
+}
+
+// A mode change reaches an agent built before it, as a running task's is.
+func TestPermissionsReachAgentsBuiltEarlier(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "m.json"), []byte(`[{"text":"ok"}]`), 0o600)
+	a, err := New(Options{Mock: filepath.Join(root, "m.json"), Root: root, ConfigDir: t.TempDir(), Permissions: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	child := a.build(a.Agent.Config, nil)
+	bash := tool.Find(child.Tools, "bash")
+	c := llm.ToolCall{Name: "bash", Arguments: `{"command":"true"}`}
+	if ok, err := child.Approve(context.Background(), bash, c, "$ true"); !ok || err != nil {
+		t.Fatalf("auto refused bash: %v", err)
+	}
+	a.SetPermissions(permission.ReadOnly, nil)
+	if ok, _ := child.Approve(context.Background(), bash, c, "$ true"); ok {
+		t.Fatal("read-only did not reach the task")
+	}
+}
+
+// A task model replaces the conversation's model and effort in tasks of the provider it was
+// resolved for, and only those.
+func TestTaskModel(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "m.json"), []byte(`[{"text":"ok"}]`), 0o600)
+	open := func(o Options, settings string) (*App, error) {
+		cfg := t.TempDir()
+		os.WriteFile(filepath.Join(cfg, state.SettingsFile), []byte(settings), 0o600)
+		o.Mock, o.Root, o.ConfigDir = filepath.Join(root, "m.json"), root, cfg
+		a, err := New(o)
+		if err != nil {
+			return nil, err
+		}
+		_, err = a.Prepare(context.Background())
+		return a, err
+	}
+	a, err := open(Options{TaskModel: "small", Effort: "high"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := a.build(a.Agent.Config, nil)
+	if child.Model != "small" || child.Effort != "" || a.TaskModel() != "small" || a.Agent.Model != "mock" {
+		t.Fatalf("task model %q effort %q; conversation %q", child.Model, child.Effort, a.Agent.Model)
+	}
+	other := a.Agent.Config
+	other.Provider = mock.New()
+	if got := a.build(other, nil).Model; got != "mock" {
+		t.Fatalf("a task of another provider got %q", got)
+	}
+
+	b, err := open(Options{}, "[tasks]\nmodel = \"tiny\"\n")
+	if err != nil || b.build(b.Agent.Config, nil).Model != "tiny" {
+		t.Fatalf("tasks.model: %v", err)
+	}
+	c, err := open(Options{}, "")
+	if err != nil || c.TaskModel() != "" || c.build(c.Agent.Config, nil).Model != "mock" {
+		t.Fatalf("no task model: %v", err)
+	}
+	if _, err := open(Options{TaskModel: "openai:gpt-5.5"}, ""); err == nil || !strings.Contains(err.Error(), "session's provider, mock") {
+		t.Fatalf("another provider's model: %v", err)
 	}
 }

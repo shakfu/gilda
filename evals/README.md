@@ -18,6 +18,12 @@ command's doc comment for the task format.
 | `many-chapters-elision` | reading 16 files with `read` alone in a 50k window, so old results are elided before the answer |
 | `ask-when-ambiguous` | a request missing the one fact it needs; passes only if nothing changes and the answer asks |
 | `keep-uncommitted-work` | a fix in a git checkout with the user's uncommitted work in the same file, which must survive |
+| `fan-out-research` | four independent lookups across 40 files, one with an override in `init`; shows whether a model starts background tasks (`task background` in the tool mix) and collects them before answering |
+| `fan-out-delegate` | the same repository, with the prompt asking for one background task per service; the check reads the run's records (`GILDA_RECORDS`) and needs four background tasks started and every one collected |
+| `fan-out-slow` | four values only a 20 s `./probe` call gives: 80 s one after another, about 20 s in parallel, through background tasks or `bash` jobs; compare `seconds` and the tool mix |
+
+The three `fan-out-` tasks separate preference (`fan-out-research`), capability (`fan-out-delegate`)
+and benefit (`fan-out-slow`). Haiku 5.5's results are in `docs/dev/async-tasks.md`, "Measured".
 
 `many-chapters-elision` was generated once with a fixed seed; its window is a guess at 70-90% of
 the tokens a run reads, and differs by tokenizer. Check its `elided` column before reading its

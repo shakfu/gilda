@@ -68,6 +68,10 @@ type Config struct {
 	Prices *price.Catalog
 	// SessionID keys prompt caching.
 	SessionID string
+	// Reserve, when set, is asked before each request with an estimate of its input tokens and
+	// its output cap. It returns the output cap to send instead, and settle, which the request
+	// calls with its usage, or with nil when it did not complete. A task budget uses it.
+	Reserve func(ctx context.Context, input, output int64) (grant int64, settle func(*llm.Usage), err error)
 	// Approve, when set, is asked before each call runs; label is what Label reports, such as
 	// "$ go test". A refusal goes back to the model as Declined, an error as its text. Nil runs
 	// every call; permission.Approver builds one from a mode.
@@ -86,6 +90,8 @@ type Agent struct {
 	warned bool
 	// seq tells this agent's generated call ids from a subagent's; 0 until first needed.
 	seq int64
+	// Tasks holds the background tasks this agent started; nil when it cannot start any.
+	Tasks *Tasks
 }
 
 // agents numbers the agents that generate call ids.
@@ -140,10 +146,21 @@ type (
 	Elided struct {
 		Results, Bytes int
 	}
-	// TaskDone reports a subagent's usage, which the run and the session include.
+	// TaskDone reports a finished subagent. Its usage is in the session's once: a frontend
+	// counts it from a TaskDone that is not inside a TaskEvent.
 	TaskDone struct {
-		Usage llm.Usage
-		Turns int
+		ID, Name   string
+		Background bool
+		Usage      llm.Usage
+		Turns      int
+		// Err is why the subagent stopped, if it failed or was cancelled.
+		Err error
+	}
+	// TaskEvent is an event from inside a task: its tool calls and results, its retries, and
+	// its own tasks finishing.
+	TaskEvent struct {
+		ID, Name string
+		Event    Event
 	}
 	// Response closes one provider round-trip.
 	Response struct {
@@ -162,6 +179,7 @@ func (Response) event()   {}
 func (Retry) event()      {}
 func (Elided) event()     {}
 func (TaskDone) event()   {}
+func (TaskEvent) event()  {}
 
 // Result summarises one prompt.
 type Result struct {
@@ -201,7 +219,19 @@ func (a *Agent) Run(ctx context.Context, prompt string, emit func(Event)) (Resul
 		rctx := llm.WithRetries(ctx, func(attempt int, reason string) {
 			emit(Retry{Attempt: attempt, Reason: reason})
 		})
-		resp, err := a.Provider.Stream(rctx, a.request(), func(e llm.Event) {
+		req := a.request()
+		var settle func(*llm.Usage)
+		if a.Reserve != nil {
+			grant, s, err := a.Reserve(ctx, a.inputEstimate(req), req.MaxTokens)
+			if err != nil {
+				if len(a.History) == start+1 {
+					a.History = a.History[:start]
+				}
+				return res, err
+			}
+			req.MaxTokens, settle = grant, s
+		}
+		resp, err := a.Provider.Stream(rctx, req, func(e llm.Event) {
 			switch e.Kind {
 			case llm.TextDelta:
 				emit(Text{e.Text})
@@ -211,6 +241,13 @@ func (a *Agent) Run(ctx context.Context, prompt string, emit func(Event)) (Resul
 				emit(ToolStart{e.Text})
 			}
 		})
+		if settle != nil {
+			if err != nil {
+				settle(nil)
+			} else {
+				settle(&resp.Usage)
+			}
+		}
 		// A stream that ended early left no trace in the history, so the same request can go
 		// again. The SDKs retry failed requests but not a response cut off mid-stream.
 		if errors.Is(err, llm.ErrIncomplete) && ctx.Err() == nil && cut < a.StreamRetries {
@@ -263,6 +300,11 @@ func (a *Agent) Run(ctx context.Context, prompt string, emit func(Event)) (Resul
 		if len(msg.Calls) > 0 {
 			tctx := context.WithValue(ctx, runKey{}, &runState{agent: a, res: &res, emit: emit})
 			results, err := a.runTools(tctx, msg.Calls, skip, emit)
+			// A task that finished meanwhile is named after the last result, so the model hears of
+			// it without a message of its own.
+			if n := a.Tasks.Notice(); n != "" && len(results) > 0 {
+				results[len(results)-1].Content += "\n\n" + n
+			}
 			a.History = append(a.History, llm.Message{Role: llm.Tool, Results: results})
 			if err != nil {
 				return res, err
@@ -288,6 +330,25 @@ func (a *Agent) request() llm.Request {
 		Effort:    a.Effort,
 		SessionID: a.SessionID,
 	}
+}
+
+// inputEstimate is what a request's prompt may cost in tokens: its text at bytesPerToken, or the
+// last request's prompt and output, whichever is more.
+func (a *Agent) inputEstimate(req llm.Request) int64 {
+	n := len(req.System)
+	for _, m := range req.Messages {
+		n += len(m.Text)
+		for _, c := range m.Calls {
+			n += len(c.Name) + len(c.Arguments)
+		}
+		for _, r := range m.Results {
+			n += len(r.Content) + len(r.Images)*imageTokens*bytesPerToken
+		}
+	}
+	if specs, err := json.Marshal(req.Tools); err == nil {
+		n += len(specs)
+	}
+	return max(int64(n/bytesPerToken), a.Used)
 }
 
 // imageNote replaces images for a model that does not accept them.
