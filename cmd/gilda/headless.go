@@ -42,57 +42,83 @@ func headless(parent context.Context, a *app.App, prompt string, asJSON, color b
 		a.SetPermissions("", ttyAsk(a.Preview, color))
 	}
 
+	// --json reports warnings as records, so a program sees why a run did less. Those before start
+	// wait for it, or for the failure record when setup fails. Background tasks write records from
+	// their own goroutines, so mu orders the writes.
+	var j *jsonOut
+	if asJSON {
+		j = &jsonOut{w: os.Stdout}
+	}
+	var mu sync.Mutex
+	var pending []string
+	started := false
+	warn := func(msg string) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case !asJSON:
+			fmt.Fprintln(os.Stderr, "gilda: warning:", msg)
+		case started:
+			j.warning(msg)
+		default:
+			pending = append(pending, msg)
+		}
+	}
+	flush := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, w := range pending {
+			j.warning(w)
+		}
+		pending, started = nil, true
+	}
+
 	if dir, files := a.Trust(); dir != "" {
 		ok, answered := false, false
 		if !asJSON {
 			ok, answered = ttyTrust(ctx, dir, files, color)
 		}
 		if answered {
-			if err := a.SetTrust(dir, ok); err != nil && !asJSON {
-				fmt.Fprintln(os.Stderr, "gilda: warning:", err)
+			if err := a.SetTrust(dir, ok); err != nil {
+				warn(err.Error())
 			}
 		} else {
 			// Not recorded: nobody answered.
 			a.SetPermissions(permission.Ask, a.Ask())
-			if !asJSON {
-				fmt.Fprintf(os.Stderr, "gilda: instructions in %s are not trusted yet, so this run uses ask mode; "+
-					"answer in the REPL, or pass --permissions auto\n", tui.Visible(dir))
-			}
+			warn(fmt.Sprintf("instructions in %s are not trusted yet, so this run uses ask mode; "+
+				"answer in the REPL, or pass --permissions auto", tui.Visible(dir)))
 		}
 	}
 
 	warns, err := a.Prepare(ctx)
 	if err != nil {
 		if asJSON {
+			flush()
 			return writeFailure(os.Stdout, err)
 		}
 		fmt.Fprintln(os.Stderr, "gilda:", err)
 		return 1
 	}
 	for _, w := range warns {
-		if !asJSON {
-			fmt.Fprintln(os.Stderr, "gilda: warning:", w)
-		}
+		warn(fmt.Sprint(w))
 	}
 
 	diag, st := tui.Writer(os.Stderr, color), tui.NewStyles()
 	var emit func(agent.Event)
-	var j *jsonOut
 	if asJSON {
-		j = &jsonOut{w: os.Stdout}
 		start := map[string]any{"type": "start", "provider": a.ProviderID, "model": a.Agent.Model,
 			"session_id": a.Agent.SessionID, "context_window": a.Agent.Context}
 		if tm := a.TaskModel(); tm != "" {
 			start["task_model"] = tm
 		}
 		j.write(start)
+		flush()
 		emit = j.event
 	} else {
 		emit = textEvents(os.Stdout, diag, st)
 	}
 
 	// Background tasks report from their own goroutines.
-	var mu sync.Mutex
 	locked := func(e agent.Event) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -108,8 +134,8 @@ func headless(parent context.Context, a *app.App, prompt string, asJSON, color b
 	})
 	res.Usage.Add(a.Agent.Tasks.Usage())
 	cancelled := errors.Is(err, context.Canceled) || ctx.Err() != nil
-	if serr := a.Save(); serr != nil && !asJSON {
-		fmt.Fprintln(os.Stderr, "gilda: warning: session:", serr)
+	if serr := a.Save(); serr != nil {
+		warn(fmt.Sprint("session: ", serr))
 	}
 
 	if asJSON {
@@ -218,6 +244,10 @@ func (j *jsonOut) result(a *app.App, res agent.Result, err error, cancelled bool
 		"usage": res.Usage, "context_used": a.Agent.Used, "context_window": a.Agent.Context,
 		"session_id": a.Agent.SessionID,
 	})
+}
+
+func (j *jsonOut) warning(msg string) {
+	j.write(map[string]any{"type": "warning", "message": msg})
 }
 
 // writeFailure reports a setup error as the result record, so a caller parsing stdout sees it.

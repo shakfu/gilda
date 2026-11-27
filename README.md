@@ -98,7 +98,7 @@ Start llama-server with `--jinja` so tool calls work.
 
 - **REPL:** output goes to the terminal's scrollback. An input box and a status bar stay pinned below it. The bar shows the working directory, or a spinner, elapsed time and the current step, then the model, effort, context used and session cost. Assistant text streams as styled markdown, one line at a time; a table prints aligned once its last row arrives. Each tool call gets one line, such as `[tool] read main.go:1-80 -> 80 lines` or `[tool] $ go test -> exit 1: FAIL`. Each prompt ends with a usage line: context, tokens in with the cached share, tokens out, cost.
 
-- **Headless:** `-p` streams the answer to stdout and everything else to stderr. `--json` prints one record per line: `start`, `turn`, `tool_call`, `tool_result`, `retry`, `elided` and `task`, then a final `result` with `outcome`, `text`, `error`, `turns`, `usage` and `context_used`. A record from inside a background task carries a `task` field with its id. `-p` ends once every background task has, and its `usage` includes theirs. `outcome` is `complete`, `truncated` (cut at `max_tokens`), `error` or `cancelled`. Exit status 0 when complete or truncated, 1 on error, 2 on a usage error, 130 when cancelled. Plain-text stdout gets each response's text when the response ends, so a response resent after a cut stream prints once.
+- **Headless:** `-p` streams the answer to stdout and everything else to stderr. `--json` prints one record per line: `start`, `warning`, `turn`, `tool_call`, `tool_result`, `retry`, `elided` and `task`, then a final `result` with `outcome`, `text`, `error`, `turns`, `usage` and `context_used`. Each warning `-p` would print on stderr is a `warning` record instead, such as an untrusted `AGENTS.md` dropping the run to `ask` mode; one raised before `start` follows it, or precedes the `result` when setup fails. A record from inside a background task carries a `task` field with its id. `-p` ends once every background task has, and its `usage` includes theirs. `outcome` is `complete`, `truncated` (cut at `max_tokens`), `error` or `cancelled`. Exit status 0 when complete or truncated, 1 on error, 2 on a usage error, 130 when cancelled. Plain-text stdout gets each response's text when the response ends, so a response resent after a cut stream prints once.
 
 - **Network:** a response streams with no overall timeout, so a long answer is never cut off; Esc or Ctrl-C ends a stalled one. When a provider's SDK retries a request, the REPL's status bar and a `[retry] 1 after 503 Service Unavailable` line say why, as do `-p`'s stderr and a `retry` record in `--json`. Anthropic and OpenAI retry up to 4 times, the local providers twice, OpenRouter for up to a minute. A response cut off mid-stream is sent again by gilda itself, up to twice in a row; the cut response never enters the history. `GILDA_LOG=FILE` records each request's endpoint and status and the raw response stream, never request bodies or headers.
 
@@ -156,6 +156,8 @@ Decisions follow what each tool declares, not its name, so a custom tool called 
 - **Hosts:** the hosts a call contacts. A tool that declares them is a network tool and never read-only, since a request can carry out whatever the model has read.
 
 - `bash` is recognised by its type.
+
+- `task` declares that it writes no files, so `read-only` refuses it. Its subagent could only `read` there, as `bash` is refused, and each task starts paid requests without asking. `task_collect` is read-only.
 
 - A tool that declares nothing is treated as modifying anything.
 
@@ -348,7 +350,7 @@ cd minos && ACP_SLOW_PROMPT=wait ACP_PERMISSION_PROMPT=ask make acp-conformance 
 
 ## Library
 
-The CLI is a thin layer over packages that can be used on their own:
+The CLI (`cmd/gilda`) is a thin layer over packages that can be used on their own. [`docs/architecture.md`](docs/architecture.md) shows how they fit together.
 
 | Package | Holds |
 |-|-|
@@ -359,10 +361,10 @@ The CLI is a thin layer over packages that can be used on their own:
 | `permission` | permission modes, as an `Approve` function |
 | `agent` | the tool loop, reporting typed events |
 | `prompt` | the system prompt, `AGENTS.md` and skills |
-| `price` | cost and context windows from OpenRouter's list |
+| `price` | cost and context windows from OpenRouter's list; `*price.Catalog` is an `agent.Pricer` |
 | `provider`, `app`, `state` | the registry, session wiring and saved state the CLI uses |
 | `tui` | the REPL |
-| `acp` | the `--acp` server |
+| `acp` | the Agent Client Protocol server behind `--acp` |
 
 ```go
 import (
@@ -419,7 +421,15 @@ res, err := a.Run(ctx, "make the tests pass", func(e agent.Event) {
 
 - `Run` blocks, so call it from a goroutine and cancel it through its context. One `Run` at a time per `Agent`; read usage from `Response` events rather than from the `Agent` while a run is in flight.
 
-Importing `agent`, `app` or the adapters links no TUI or CLI dependency.
+- Without `app`: `agent.Config.Prices` takes any `agent.Pricer`, such as `*price.Catalog`; its doc comment gives the rules for one. `agent.NewTasks` decides each task's `Approve`; see `TaskOptions.OwnApproval`. `agent.TaskConfig` builds a task's config as `app` does. Set `TaskOptions.Tools` to the function `Build` gets a task's tools from, so `task`'s description names them.
+
+`examples/swarm` embeds the library without `app`, `state` or `price`, in a module of its own. It takes a markdown brief: the `#` heading is the objective, each `##` heading a part, and the text under a heading its context. One agent works on each part, all at once; when all have returned, one more agent addresses the objective from their results. A `depends: Survey, 3` line under a part makes it wait for those parts, named by title or number, and read their results. It has its own `Pricer` and uses `TaskConfig` for `TaskOptions.Build`, and needs a provider key. Its default mode, `read-only`, offers agents neither `bash` nor `task`; `-permissions auto` offers both, and lets `bash` write inside `-C`, so point `-C` at a copy.
+
+```sh
+cd examples/swarm && go run . -C ../.. -price-in 1 -price-out 5 brief.md > report.md
+```
+
+Importing any package but `tui` links no TUI or CLI dependency; `examples/swarm/go.mod` lists none.
 
 ## Build
 

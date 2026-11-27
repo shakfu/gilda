@@ -24,6 +24,7 @@ None open.
 - [x] **E1**: old tool results are elided past 70% of the window, and the model is warned at 85% (`agent/elide.go`).
   - [ ] Test whether Fable 5.1 and Opus 5.5 treat an elided tool result as edited history (`docs/dev/design.md`).
   - [ ] `/compact` (a summary) for sessions whose context is text, not tool output.
+  - [ ] `Agent.Used` is the last response's input plus output (`agent/agent.go:277`), so the 85% and 95% checks miss the tool results added since. A large result can pass the 95% check and still overflow. Check against an estimate of the pending request instead, as `inputEstimate` makes for `Reserve`. Fix before `/compact`, whose trigger would read the same number.
 
 - [x] **E2**: sessions are saved after each prompt and resumed with `-c`, `--resume ID`; `--sessions` lists them (`app/session.go`).
   - [x] Two instances resuming the same session overwrote each other's saves. The second to save now forks.

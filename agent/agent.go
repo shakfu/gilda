@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 
 	"github.com/shakfu/gilda/llm"
-	"github.com/shakfu/gilda/price"
 	"github.com/shakfu/gilda/tool"
 )
 
@@ -64,8 +63,9 @@ type Config struct {
 	// KeepResults is how many recent tool messages keep their results whole when the window
 	// passes 70% and older results are elided. Default 4; negative turns elision off.
 	KeepResults int
-	// Prices estimates cost for providers that report none. May be nil.
-	Prices *price.Catalog
+	// Prices estimates cost for providers that report none. May be nil; *price.Catalog
+	// implements it.
+	Prices Pricer
 	// SessionID keys prompt caching.
 	SessionID string
 	// Reserve, when set, is asked before each request with an estimate of its input tokens and
@@ -157,7 +157,8 @@ type (
 		Err error
 	}
 	// TaskEvent is an event from inside a task: its tool calls and results, its retries, and
-	// its own tasks finishing.
+	// its own tasks finishing. ID is the task the event is from, at any depth, so TaskEvents
+	// never nest; a nested task's TaskDone arrives in its parent's TaskEvent.
 	TaskEvent struct {
 		ID, Name string
 		Event    Event
@@ -180,6 +181,13 @@ func (Retry) event()      {}
 func (Elided) event()     {}
 func (TaskDone) event()   {}
 func (TaskEvent) event()  {}
+
+// Pricer estimates the cost of usage on a provider's model; ok is false when it has no rates.
+// Tasks copy their parent's Pricer and call it from their own goroutines, so it must be safe
+// for concurrent use. Store nil, not a nil pointer, for no prices: the nil check sees only nil.
+type Pricer interface {
+	Cost(provider, model string, u llm.Usage) (cost float64, ok bool)
+}
 
 // Result summarises one prompt.
 type Result struct {
@@ -462,9 +470,10 @@ func (a *Agent) price(u *llm.Usage) {
 	if u.Cost != nil {
 		return
 	}
-	if e, ok := a.Prices.Lookup(a.Provider.Name(), a.Model); ok {
-		if c, ok := e.Cost(*u); ok {
-			u.Cost, u.Estimated = &c, true
-		}
+	if a.Prices == nil {
+		return
+	}
+	if c, ok := a.Prices.Cost(a.Provider.Name(), a.Model, *u); ok {
+		u.Cost, u.Estimated = &c, true
 	}
 }

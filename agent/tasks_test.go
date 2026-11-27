@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -512,5 +514,207 @@ func TestTasksSpendTheTreeBudget(t *testing.T) {
 	out, _ := tasks.report(nil)
 	if last := out[len(out)-1]; last != "task budget: 9100 of 20000 tokens spent" {
 		t.Fatalf("report ends %q", last)
+	}
+}
+
+func TestTaskConfigAddsEachPartOnce(t *testing.T) {
+	read := tool.Read{Env: tool.Env{Root: t.TempDir()}}
+	parent := Config{System: "root", SessionID: "s", Tools: []tool.Tool{tool.Bash{}}}
+	child := TaskConfig(parent, []tool.Tool{read}, NewTasks(TaskOptions{}))
+	var names []string
+	for _, tl := range child.Tools {
+		names = append(names, tl.Spec().Name)
+	}
+	if strings.Join(names, ",") != "read,task,task_collect" {
+		t.Fatalf("tools %v", names)
+	}
+	grand := TaskConfig(child, []tool.Tool{read}, nil)
+	if len(grand.Tools) != 1 || strings.Count(grand.System, TaskPrompt) != 1 || grand.SessionID != "s-task" {
+		t.Fatalf("grandchild tools %d, system %q, session %q", len(grand.Tools), grand.System, grand.SessionID)
+	}
+	if len(parent.Tools) != 1 || parent.SessionID != "s" {
+		t.Fatal("TaskConfig changed its parent")
+	}
+}
+
+// A scope without Build refuses tasks; it panicked, outside any recover, ending the process.
+func TestTasksWithoutBuildRefuseToStart(t *testing.T) {
+	a := withTasks(Config{Provider: mock.New(
+		mock.Step{Calls: []mock.Call{bg("x", "")}},
+		mock.Step{Text: "done"},
+	), Model: "m"}, NewTasks(TaskOptions{}))
+	if _, err := a.Run(context.Background(), "go", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.History[2].Results[0]; !got.IsError || !strings.Contains(got.Content, "Build is nil") {
+		t.Fatalf("result %+v", got)
+	}
+}
+
+// task_collect names a running task without its latest call, which /tasks shows.
+func TestCollectLeavesOutARunningTasksLabel(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "secret-name"), []byte("x\n"), 0o644)
+	gate := make(chan struct{})
+	tasks := tree1(func() *Agent {
+		p := mock.New(mock.Step{Calls: []mock.Call{call("read", map[string]string{"path": "secret-name"})}}, mock.Step{Text: "done"})
+		return New(Config{Provider: &opening{Provider: p, at: 2, open: func() { <-gate }}, Model: "m",
+			Tools: []tool.Tool{tool.Read{Env: tool.Env{Root: root}}}})
+	})
+	defer tasks.Close()
+	h, _ := tasks.spawn(Config{}, "a", "reader", true, nil)
+	for !strings.Contains(h.Status(), "last: read secret-name") {
+		time.Sleep(time.Millisecond)
+	}
+	res, err := TaskCollect{Tasks: tasks}.Run(context.Background(), json.RawMessage(`{}`))
+	close(gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Output, `t1 "reader" running`) || strings.Contains(res.Output, "secret-name") {
+		t.Fatalf("collect output %q", res.Output)
+	}
+}
+
+// However deep a background task runs, its events arrive in one TaskEvent with its own id.
+func TestTaskEventsNeverNest(t *testing.T) {
+	level := func(sub *Tasks) *Agent {
+		return withTasks(Config{Provider: mock.New(
+			mock.Step{Calls: []mock.Call{bg("go", "")}},
+			mock.Step{Text: "waiting"},
+			mock.Step{Calls: []mock.Call{call("task_collect", map[string]any{"wait": 5})}},
+			mock.Step{Text: "done"},
+		), Model: "m"}, sub)
+	}
+	tasks := NewTasks(TaskOptions{Depth: 3, Build: func(_ Config, sub *Tasks) *Agent {
+		if sub != nil {
+			return level(sub)
+		}
+		return New(Config{Provider: mock.New(
+			mock.Step{Calls: []mock.Call{call("bash", map[string]string{"command": "true"})}},
+			mock.Step{Text: "leaf"},
+		), Model: "m", Tools: []tool.Tool{tool.Bash{Env: tool.Env{Root: t.TempDir(), Jobs: &tool.Jobs{}}}}})
+	}})
+	var s sink
+	tasks.SetSink(s.add)
+	if _, err := Drive(context.Background(), level(tasks), "go", nil); err != nil {
+		t.Fatal(err)
+	}
+	tasks.Close()
+	var done []string
+	leaf := false
+	for _, e := range s.all() {
+		switch e := e.(type) {
+		case TaskEvent:
+			switch in := e.Event.(type) {
+			case TaskEvent:
+				t.Fatalf("TaskEvent %s holds TaskEvent %s", e.ID, in.ID)
+			case TaskDone:
+				done = append(done, e.ID+">"+in.ID)
+			case ToolResult:
+				leaf = leaf || (e.ID == "t3" && in.Call.Name == "bash")
+			}
+		case TaskDone:
+			done = append(done, e.ID)
+		}
+	}
+	slices.Sort(done)
+	if strings.Join(done, ",") != "t1,t1>t2,t2>t3" || !leaf {
+		t.Fatalf("task_done %v, leaf's bash tagged t3: %v", done, leaf)
+	}
+}
+
+// approvalTree runs one task that calls read once. The task's Build sets an Approve that
+// approves; the caller's refuses. It returns which of the two the call reached.
+// approvalTree runs one task that reads a file; gated gives its caller an Approve.
+func approvalTree(t *testing.T, own, gated bool) (caller, built []string) {
+	t.Helper()
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "f"), []byte("x\n"), 0o644)
+	var mu sync.Mutex
+	record := func(to *[]string, ok bool) func(context.Context, tool.Tool, llm.ToolCall, string) (bool, error) {
+		return func(_ context.Context, _ tool.Tool, _ llm.ToolCall, label string) (bool, error) {
+			mu.Lock()
+			*to = append(*to, label)
+			mu.Unlock()
+			return ok, nil
+		}
+	}
+	tasks := NewTasks(TaskOptions{Depth: 1, OwnApproval: own, Build: func(Config, *Tasks) *Agent {
+		p := mock.New(mock.Step{Calls: []mock.Call{call("read", map[string]string{"path": "f"})}}, mock.Step{Text: "done"})
+		return New(Config{Provider: p, Model: "m", Tools: []tool.Tool{tool.Read{Env: tool.Env{Root: root}}},
+			Approve: record(&built, true)})
+	}})
+	var parent Config
+	if gated {
+		parent.Approve = record(&caller, false)
+	}
+	h, err := tasks.spawn(parent, "go", "", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-h.done
+	return caller, built
+}
+
+// By default a task's calls go to its caller's Approve, whatever Build set.
+func TestTasksUseTheirCallersApproval(t *testing.T) {
+	caller, built := approvalTree(t, false, true)
+	if !slices.Equal(caller, []string{"read f"}) || len(built) != 0 {
+		t.Fatalf("caller's Approve saw %v, Build's saw %v; want only the caller's", caller, built)
+	}
+}
+
+func TestOwnApprovalKeepsBuildsApprove(t *testing.T) {
+	caller, built := approvalTree(t, true, true)
+	if len(caller) != 0 || !slices.Equal(built, []string{"read f"}) {
+		t.Fatalf("caller's Approve saw %v, Build's saw %v; want only Build's", caller, built)
+	}
+}
+
+// A caller with no Approve leaves Build's in place, so copying the caller's never removes a check.
+func TestAnUngatedCallerKeepsBuildsApprove(t *testing.T) {
+	_, built := approvalTree(t, false, false)
+	if !slices.Equal(built, []string{"read f"}) {
+		t.Fatalf("Build's Approve saw %v; want the task's read", built)
+	}
+}
+
+func TestTaskDescriptionNamesATasksTools(t *testing.T) {
+	env := tool.Env{Root: t.TempDir(), Jobs: &tool.Jobs{}}
+	describe := func(tools ...tool.Tool) string {
+		tasks := NewTasks(TaskOptions{Tools: func() []tool.Tool { return tools }})
+		return Task{Tasks: tasks}.Spec().Description
+	}
+	cases := []struct {
+		got, want string
+	}{
+		// gilda's own tasks: the sentence the description had before it was derived.
+		{describe(tool.Read{Env: env}, tool.Bash{Env: env}), "It has read and bash but no file-editing tools,"},
+		{describe(tool.Read{Env: env}), "It has read but no file-editing tools,"},
+		{describe(&tool.Read{Env: env}, &tool.Bash{Env: env}), "It has read and bash but no file-editing tools,"},
+		{describe(tool.Read{Env: env}, tool.Write{Env: env}, tool.Bash{Env: env}), "It has read, write and bash,"},
+		{Task{Tasks: NewTasks(TaskOptions{})}.Spec().Description, "It has the tools this app gives tasks,"},
+		{Task{}.Spec().Description, "It has the tools this app gives tasks,"},
+	}
+	for _, c := range cases {
+		if !strings.Contains(c.got, c.want) {
+			t.Errorf("description lacks %q:\n%s", c.want, c.got)
+		}
+	}
+}
+
+// Spec runs on every request; Tools is called once per tree, and Build never.
+func TestTaskDescriptionAsksForToolsOnce(t *testing.T) {
+	var calls, builds atomic.Int32
+	tasks := NewTasks(TaskOptions{
+		Build: func(parent Config, sub *Tasks) *Agent { builds.Add(1); return New(parent) },
+		Tools: func() []tool.Tool { calls.Add(1); return nil },
+	})
+	for range 3 {
+		Task{Tasks: tasks}.Spec()
+	}
+	if calls.Load() != 1 || builds.Load() != 0 {
+		t.Fatalf("Tools called %d times, Build %d, for 3 descriptions; want 1 and 0", calls.Load(), builds.Load())
 	}
 }

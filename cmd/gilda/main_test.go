@@ -373,8 +373,8 @@ func TestResentAnswerPrintsOnce(t *testing.T) {
 	}
 }
 
-// With no one to answer the trust question, a run under an AGENTS.md uses ask mode, and records
-// nothing.
+// With no one to answer the trust question, a run under an AGENTS.md uses ask mode, says so in a
+// warning record after start, and records nothing.
 func TestUntrustedCheckoutUsesAsk(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("x"), 0o644)
@@ -391,12 +391,48 @@ func TestUntrustedCheckoutUsesAsk(t *testing.T) {
 		if err != nil || !strings.Contains(string(out), want) {
 			t.Errorf("mode %q: %v %s", mode, err, out)
 		}
+		lines := strings.SplitN(string(out), "\n", 3)
+		warned := len(lines) > 1 && strings.Contains(lines[1], `"type":"warning"`) && strings.Contains(lines[1], "not trusted yet")
+		if warned != (mode == "") {
+			t.Errorf("mode %q: warning %v after start: %s", mode, warned, out)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(dir, "gilda", "state.json")); err == nil {
 		data, _ := os.ReadFile(filepath.Join(dir, "gilda", "state.json"))
 		if strings.Contains(string(data), "trust") {
 			t.Errorf("an unanswered question was recorded: %s", data)
 		}
+	}
+}
+
+// A setup failure still reports the warnings gathered before it, ahead of its result record.
+func TestASetupFailureKeepsItsWarnings(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(dir, "m.json"), []byte(`[{"text":"ok"}]`), 0o644)
+	cmd := exec.Command(bin, "--mock", "m.json", "-p", "go", "--json", "--task-model", "anthropic:x")
+	cmd.Dir = dir
+	cmd.Env = testEnv("XDG_STATE_HOME="+dir, "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir)
+	out, _ := cmd.Output()
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "not trusted yet") || !strings.Contains(lines[1], `"outcome":"error"`) {
+		t.Fatalf("records:\n%s", out)
+	}
+}
+
+// A session that cannot be saved is a warning record before the result.
+func TestAFailedSaveIsAWarningRecord(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "m.json"), []byte(`[{"text":"ok"}]`), 0o644)
+	os.WriteFile(filepath.Join(dir, "state"), nil, 0o644)
+	cmd := exec.Command(bin, "--mock", "m.json", "-p", "go", "--json")
+	cmd.Dir = dir
+	cmd.Env = testEnv("XDG_STATE_HOME="+filepath.Join(dir, "state"), "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir)
+	out, err := cmd.Output()
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	n := len(lines)
+	if err != nil || n < 2 || !strings.Contains(lines[n-2], `"message":"session: `) || !strings.Contains(lines[n-1], `"type":"result"`) {
+		t.Fatalf("%v records:\n%s", err, out)
 	}
 }
 

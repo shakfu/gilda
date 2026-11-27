@@ -1,6 +1,6 @@
 # Async tasks
 
-`task` with `background: true` starts a subagent and returns at once. `task_collect` reads finished answers, waits for one, or cancels. Children can start children of their own, up to a depth limit. Status: built 2026-11-22 in the stages below; not yet run against a live model.
+`task` with `background: true` starts a subagent and returns at once. `task_collect` reads finished answers, waits for one, or cancels. Children can start children of their own, up to a depth limit. Status: built 2026-11-22 in the stages below; run live in "Measured" and through `examples/swarm` ("Embedding").
 
 Prior art: minima's `-r` (`~/projects/personal/minima/docs/dev/recursion.md`) runs children as processes coordinated through files. prime-agent (`rlm.spawn`, `rlm.collect`, inbox notices) runs them under a daemon. gilda runs them as goroutines in its own process. That replaces minima's registry, `flock`, ledger, pid watch and stop markers with a `context` tree and channels.
 
@@ -75,7 +75,8 @@ Each task request reserves before it is sent, through `agent.Config.Reserve`, an
 - The permission mode is read at each call (`App.approve`), so a `/permissions` change reaches running tasks too.
 - `read` and `bash`, plus `task` and `task_collect` while depth allows. No editing tools.
 - A read record of their own, so a parent cannot edit a file only a child has read.
-- Approvals go through the same `Approve` as the parent, so the user approves a child's calls as their own.
+- Approvals go through the caller's `Approve`, so the user approves a child's calls as their own. `spawn` sets it after `TaskOptions.Build` returns, so a `Build` that leaves `Approve` nil cannot run its calls unasked. `OwnApproval` keeps `Build`'s instead, as does a caller with no `Approve`.
+- `read-only` mode refuses `task`: it declares only that it writes no files. A child there would have `read` alone, and each starts paid requests without asking. `task_collect` is read-only.
 - A panic in a child becomes that task's error.
 
 ## Usage
@@ -154,6 +155,14 @@ Quoting the user's request at the top of each task's prompt (`-140557`, 5/6) did
 - The Sonnet root's own requests were $0.0281 of the $0.0327 and 18,662 input tokens; the four Haiku tasks were $0.0047 and 41,250 tokens.
 - All 24 briefs said "attempts". 23 of the 24 task answers gave both counts and one gave only the retries, and every run answered with the retries.
 - So Sonnet with Haiku tasks kept Sonnet's pass rate at 35% of its cost, on 6 runs.
+
+## Embedding
+
+`examples/swarm` drives `agent.Tasks` without `app`: its own `Build` through `agent.TaskConfig`, its own `Pricer`, and a check after each run that tokens, cost and `TaskDone`s add up across every agent. On 2026-11-27, Sonnet 5.5 in `auto` mode, on a copy of the repository, with a brief asking each part for two background tasks:
+
+- 2 of 3 parts started 2 tasks each and collected both; all 4 finished in 5 turns. The part about tasks started none.
+- Every check held: 39 responses, 4 in flight at most, 440,039 input tokens.
+- The same brief in `read-only`, without the task request, read 1,615,950 input tokens: with `bash` refused, agents read whole files. One run each, so this is not a measurement of either mode.
 
 ## Stages
 

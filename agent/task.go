@@ -28,7 +28,7 @@ You are a subagent. Another agent gave you the task below and sees only your fin
 not your tool calls. Make that message complete and self-contained: state what you found,
 with file paths and line numbers, and say what you could not find.`
 
-const taskDescription = `Run a subagent on a self-contained research task, such as finding where something is implemented, which files use an API, or how a module works. It has read and bash but no file-editing tools, and it knows nothing of this conversation, so give it everything it needs. It returns its final answer. Use it to keep large searches and file contents out of this conversation.
+const taskDescription = `Run a subagent on a self-contained research task, such as finding where something is implemented, which files use an API, or how a module works. %s, and it knows nothing of this conversation, so give it everything it needs. It returns its final answer. Use it to keep large searches and file contents out of this conversation.
 
 With background true, it returns at once with a task id and the subagent runs while you work. Use it when the user asks for parallel or delegated work, or for long independent investigations; each subagent rebuilds the context you already have, so for a quick lookup work directly. You are told when one finishes; read its answer with task_collect. Collect every answer you need before giving your own.`
 
@@ -38,10 +38,10 @@ type taskArgs struct {
 	Name       string `json:"name"`
 }
 
-func (Task) Spec() llm.ToolSpec {
+func (t Task) Spec() llm.ToolSpec {
 	return llm.ToolSpec{
 		Name:        "task",
-		Description: taskDescription,
+		Description: fmt.Sprintf(taskDescription, t.Tasks.tools()),
 		Schema: map[string]any{"type": "object", "required": []string{"prompt"}, "properties": map[string]any{
 			"prompt":     map[string]any{"type": "string", "description": "The task, with all the context the subagent needs."},
 			"background": map[string]any{"type": "boolean", "description": "Return at once and run the subagent in the background."},
@@ -61,6 +61,36 @@ func (Task) Label(raw json.RawMessage) string {
 		return "task & " + p
 	}
 	return "task " + p
+}
+
+// describeTools is the sentence of task's description naming the tools a task gets. It claims
+// no file-editing tools only when each tool is read-only or bash.
+func describeTools(tools []tool.Tool) string {
+	if len(tools) == 0 {
+		return "It has the tools this app gives tasks"
+	}
+	names := make([]string, len(tools))
+	editless := true
+	for i, t := range tools {
+		names[i] = t.Spec().Name
+		isBash := false
+		switch t.(type) {
+		case tool.Bash, *tool.Bash:
+			isBash = true
+		}
+		ro, ok := t.(tool.ReadOnly)
+		if !isBash && !(ok && ro.ReadOnly()) {
+			editless = false
+		}
+	}
+	s := "It has " + names[len(names)-1]
+	if len(names) > 1 {
+		s = "It has " + strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	}
+	if editless {
+		s += " but no file-editing tools"
+	}
+	return s
 }
 
 // Paths is empty: the call itself writes nothing, and each call the subagent makes is approved
@@ -261,7 +291,7 @@ func (t *Tasks) report(ids []string) (out []string, summary string) {
 	for _, h := range hs {
 		switch {
 		case !h.finished:
-			running = append(running, h.Status())
+			running = append(running, h.status(false))
 		case len(ids) > 0 || !h.collected:
 			h.collected, h.notified = true, true
 			answers = append(answers, h.Status()+":\n"+h.answer())

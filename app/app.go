@@ -259,6 +259,7 @@ func New(opts Options) (*App, error) {
 		Running: state.Or(settings.Tasks.Running, 0),
 		Budget:  state.Or(settings.Tasks.Budget, 0),
 		Build:   a.build,
+		Tools:   a.taskTools,
 	})
 	a.taskModel = opts.TaskModel
 	if a.taskModel == "" {
@@ -435,19 +436,7 @@ func (a *App) addTask() error {
 // the caller cannot edit a file only the task has read. Tasks call it from their goroutines, so
 // it reads only parent and fields fixed in New.
 func (a *App) build(parent agent.Config, sub *agent.Tasks) *agent.Agent {
-	env := a.env
-	env.Seen = &tool.Seen{}
-	cfg := parent
-	if !strings.Contains(cfg.System, agent.TaskPrompt) {
-		cfg.System += "\n" + agent.TaskPrompt + "\n"
-	}
-	cfg.Tools = []tool.Tool{tool.Read{Env: env}, tool.Bash{Env: env}}
-	if sub != nil {
-		cfg.Tools = append(cfg.Tools, agent.Task{Tasks: sub}, agent.TaskCollect{Tasks: sub})
-	}
-	if !strings.HasSuffix(cfg.SessionID, "-task") {
-		cfg.SessionID += "-task"
-	}
+	cfg := agent.TaskConfig(parent, a.taskTools(), sub)
 	// The task model belongs to the provider Prepare resolved it for; after a provider switch,
 	// tasks follow the conversation's model.
 	if s := a.taskSpec.Load(); s != nil && s.provider == parent.Provider {
@@ -455,6 +444,13 @@ func (a *App) build(parent agent.Config, sub *agent.Tasks) *agent.Agent {
 		cfg.Model, cfg.Context, cfg.Images, cfg.Effort = s.model, s.context, s.images, ""
 	}
 	return agent.New(cfg)
+}
+
+// taskTools are one task's tools: read and bash, with a read record of their own.
+func (a *App) taskTools() []tool.Tool {
+	env := a.env
+	env.Seen = &tool.Seen{}
+	return []tool.Tool{tool.Read{Env: env}, tool.Bash{Env: env}}
 }
 
 // taskSpec is a task model resolved for one provider.
@@ -608,7 +604,7 @@ func (a *App) Prepare(ctx context.Context) ([]error, error) {
 		if err := a.loadPrices(ctx); err != nil {
 			warns = append(warns, err)
 		}
-		if a.ProviderID != "openrouter" && a.usesVendorURL(a.ProviderID) {
+		if a.prices != nil && a.ProviderID != "openrouter" && a.usesVendorURL(a.ProviderID) {
 			a.Agent.Prices = a.prices
 		}
 	}
@@ -788,7 +784,9 @@ func (a *App) Switch(ctx context.Context, providerID, model string) error {
 	}
 	if ok && !e.Local() && id != "openrouter" && a.usesVendorURL(id) {
 		a.mu.Lock()
-		a.Agent.Prices = a.prices
+		if a.prices != nil {
+			a.Agent.Prices = a.prices
+		}
 		a.mu.Unlock()
 	}
 	a.remembered = false

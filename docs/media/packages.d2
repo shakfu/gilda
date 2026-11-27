@@ -1,0 +1,95 @@
+vars: {
+  d2-config: {
+    layout-engine: tala
+  }
+}
+
+direction: down
+
+classes: {
+  sdk: {
+    style: {
+      stroke-dash: 4
+      fill: "#f5f5f5"
+    }
+  }
+}
+
+cli: "CLI only" {
+  cmd: cmd/gilda
+}
+
+frontends: "Front ends" {
+  tui: "tui\nREPL"
+  acp: "acp\nAgent Client Protocol"
+}
+
+session: "Session" {
+  app: "app\nselection, sessions, settings"
+  provider: "provider\nregistry"
+  state: "state\nsettings.toml, saved state"
+  price: "price\nOpenRouter price list"
+  prompt: "prompt\nsystem prompt, AGENTS.md, skills"
+}
+
+core: "Core" {
+  agent: "agent\ntool loop, tasks"
+  permission: "permission\nmodes, Approver"
+  tool: "tool\nread, write, edit, bash, apply_patch"
+}
+
+llm: "Providers" {
+  llm: "llm\nneutral types, Provider"
+  anthropic: llm/anthropic
+  openai: llm/openai
+  openrouter: llm/openrouter
+  compat: llm/compat
+  mock: llm/mock
+}
+
+ext: "External SDKs" {
+  cobra.class: sdk
+  charm: "bubbletea, lipgloss, bubbles"
+  charm.class: sdk
+  asdk: anthropic-sdk-go
+  asdk.class: sdk
+  osdk: openai-go
+  osdk.class: sdk
+  rsdk: OpenRouter go-sdk
+  rsdk.class: sdk
+  toml: BurntSushi/toml
+  toml.class: sdk
+}
+
+cli.cmd -> frontends.tui
+cli.cmd -> frontends.acp
+cli.cmd -> session.app
+cli.cmd -> ext.cobra
+
+frontends.tui -> session.app
+frontends.tui -> ext.charm
+frontends.acp -> session.app
+
+session.app -> core.agent
+session.app -> session.provider
+session.app -> session.state
+session.app -> session.price
+session.app -> session.prompt
+session.app -> llm.mock
+session.price -> llm.openrouter
+session.price -> session.state
+session.state -> core.permission
+session.state -> ext.toml
+session.provider -> llm.anthropic
+session.provider -> llm.openai
+session.provider -> llm.openrouter
+session.provider -> llm.compat
+
+core.agent -> core.tool
+core.permission -> core.tool
+core.tool -> llm.llm
+
+llm.anthropic -> ext.asdk
+llm.openai -> ext.osdk
+llm.compat -> ext.osdk
+llm.openrouter -> ext.rsdk

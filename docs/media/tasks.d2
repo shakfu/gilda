@@ -1,0 +1,45 @@
+vars: {
+  d2-config: {
+    layout-engine: tala
+  }
+}
+
+direction: down
+
+root: "caller: agent.Agent" {
+  cfg: "Config\nProvider, Model, Approve"
+  scope: "Tasks scope\ndepth 0"
+}
+
+tree: "tree, shared by every scope" {
+  limits: "Depth, Running, Budget"
+  sink: "sink\nTaskDone, TaskEvent"
+  build: "TaskOptions.Build"
+}
+
+spawn: "spawn\ncheck depth and Running" {
+  shape: diamond
+}
+
+child: "task: agent.Agent" {
+  ccfg: "TaskConfig(parent)\nTaskPrompt, read and bash"
+  approve: "Approve = caller's\nunless OwnApproval"
+  reserve: "Reserve = budget"
+  sub: "Tasks scope\ndepth 1, when Depth allows"
+}
+
+collect: "task_collect\nanswers as tool output"
+
+root.cfg -> spawn: "task call"
+root.scope -> spawn
+spawn -> tree.build
+tree.build -> child.ccfg
+child.ccfg -> child.approve
+child.approve -> child.reserve
+child -> tree.sink: "background events"
+child -> root: "synchronous: answer as the task result"
+child -> collect: "background: answer"
+collect -> root: "tool result"
+child.sub -> spawn: "nested task" {
+  style.stroke-dash: 4
+}

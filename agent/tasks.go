@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 
 	"github.com/shakfu/gilda/llm"
+	"github.com/shakfu/gilda/tool"
 )
 
 // Tasks holds the subagents one agent started. Every scope in a tree shares its limits, its
@@ -43,19 +44,65 @@ type TaskOptions struct {
 	// Reset; 0 means no bound. The conversation that starts them is not counted.
 	Budget int64
 	// Build makes the agent for one task from the config of the agent starting it. sub is the
-	// task's own scope, nil when it may not start tasks; Build offers it the task tools.
+	// task's own scope, nil when it may not start tasks; Build offers it the task tools, as
+	// TaskConfig does. Nil makes every task fail to start.
 	Build func(parent Config, sub *Tasks) *Agent
+	// Tools makes the tools Build gives one task, task tools aside; task's description names
+	// them. Nil describes them generically.
+	Tools func() []tool.Tool
+	// OwnApproval keeps the Approve that Build sets. Otherwise each task gets its caller's
+	// Approve, so its calls are judged as the caller's are; a caller with none keeps Build's.
+	OwnApproval bool
+}
+
+// TaskConfig is the config of a task started from parent: TaskPrompt added to its system
+// prompt, tools in place of the parent's, the task tools when sub is set, and a session id of
+// its own. Each is added once, however deep the task runs.
+func TaskConfig(parent Config, tools []tool.Tool, sub *Tasks) Config {
+	cfg := parent
+	if !strings.Contains(cfg.System, TaskPrompt) {
+		cfg.System += "\n" + TaskPrompt + "\n"
+	}
+	cfg.Tools = slices.Clone(tools)
+	if sub != nil {
+		cfg.Tools = append(cfg.Tools, Task{Tasks: sub}, TaskCollect{Tasks: sub})
+	}
+	if !strings.HasSuffix(cfg.SessionID, "-task") {
+		cfg.SessionID += "-task"
+	}
+	return cfg
 }
 
 type tree struct {
 	depth, running int
 	build          func(Config, *Tasks) *Agent
+	ownApproval    bool
+	toolsFn        func() []tool.Tool
+	describe       sync.Once
+	toolText       string  // describeTools of a task's tools
 	budget         *budget // nil without one
 
 	mu   sync.Mutex
 	seq  int
 	live map[string]*Handle // every running task, synchronous ones included
 	sink func(Event)
+}
+
+// tools describes the tools a task gets, from one TaskOptions.Tools call, made the first time
+// it is asked.
+func (t *Tasks) tools() string {
+	if t == nil {
+		return describeTools(nil)
+	}
+	tr := t.tree
+	tr.describe.Do(func() {
+		var tools []tool.Tool
+		if tr.toolsFn != nil {
+			tools = tr.toolsFn()
+		}
+		tr.toolText = describeTools(tools)
+	})
+	return tr.toolText
 }
 
 // NewTasks makes the root scope of a tree.
@@ -66,7 +113,7 @@ func NewTasks(opts TaskOptions) *Tasks {
 	if opts.Running <= 0 {
 		opts.Running = 4
 	}
-	tr := &tree{depth: opts.Depth, running: opts.Running, build: opts.Build, live: map[string]*Handle{}}
+	tr := &tree{depth: opts.Depth, running: opts.Running, build: opts.Build, toolsFn: opts.Tools, ownApproval: opts.OwnApproval, live: map[string]*Handle{}}
 	if opts.Budget > 0 {
 		tr.budget = &budget{limit: opts.Budget, changed: make(chan struct{})}
 	}
@@ -190,14 +237,18 @@ func (t *Tasks) Running() []*Handle {
 
 // Status is one line describing a task: its id, name, state and, while it runs, its latest
 // tool call.
-func (h *Handle) Status() string {
+func (h *Handle) Status() string { return h.status(true) }
+
+// status leaves out the latest call when last is false. task_collect does, since a label is
+// built from the task's own arguments and would reach the caller in gilda's words.
+func (h *Handle) status(last bool) string {
 	select {
 	case <-h.done:
 		return fmt.Sprintf("%s %q %s", h.ID, h.Name, outcome(h.res, h.err))
 	default:
 	}
 	s := fmt.Sprintf("%s %q running, %s", h.ID, h.Name, plural(int(h.turns.Load()), "turn"))
-	if l := h.last.Load(); l != nil {
+	if l := h.last.Load(); last && l != nil {
 		s += ", last: " + *l
 	}
 	return s
@@ -233,6 +284,9 @@ func (h *Handle) answer() string {
 // go to the sink, wrapped in TaskEvent.
 func (t *Tasks) spawn(parent Config, prompt, name string, background bool, emit func(Event)) (*Handle, error) {
 	tr := t.tree
+	if tr.build == nil {
+		return nil, errors.New("this app cannot start tasks: agent.TaskOptions.Build is nil")
+	}
 	if t.depth >= tr.depth {
 		return nil, fmt.Errorf("tasks nest at most %d deep", tr.depth)
 	}
@@ -271,6 +325,10 @@ func (t *Tasks) spawn(parent Config, prompt, name string, background bool, emit 
 	}
 	child := tr.build(parent, sub)
 	child.Tasks = sub
+	// A caller with no Approve leaves Build's in place, so the default never removes a check.
+	if !tr.ownApproval && parent.Approve != nil {
+		child.Approve = parent.Approve
+	}
 	if tr.budget != nil {
 		child.Reserve = tr.budget.reserve
 	}

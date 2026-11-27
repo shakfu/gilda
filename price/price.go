@@ -191,6 +191,15 @@ func (c *Catalog) Lookup(provider, model string) (Entry, bool) {
 	return Entry{}, false
 }
 
+// Cost prices u on a provider's model, so a Catalog serves as an agent.Pricer.
+func (c *Catalog) Cost(provider, model string, u llm.Usage) (float64, bool) {
+	e, ok := c.Lookup(provider, model)
+	if !ok {
+		return 0, false
+	}
+	return e.Cost(u)
+}
+
 var dateSuffix = regexp.MustCompile(`-\d{8}$|-\d{4}-\d{2}-\d{2}$`)
 var dashedVersion = regexp.MustCompile(`^(.*\D)-(\d+)-(\d+)$`)
 

@@ -1,0 +1,83 @@
+vars: {
+  d2-config: {
+    layout-engine: tala
+  }
+}
+
+direction: down
+
+classes: {
+  run: {
+    shape: oval
+    style.fill: "#e6f4ea"
+  }
+  ask: {
+    shape: oval
+    style.fill: "#fef7e0"
+  }
+  refuse: {
+    shape: oval
+    style.fill: "#fce8e6"
+  }
+}
+
+call: "tool call"
+all: "mode all?" {
+  shape: diamond
+}
+hosts: "declares Hosts?" {
+  shape: diamond
+}
+unlisted: "unlisted host?" {
+  shape: diamond
+}
+nofiles: "Paths declared and empty?" {
+  shape: diamond
+}
+ro: "declares ReadOnly?" {
+  shape: diamond
+}
+secret: "names a secret?" {
+  shape: diamond
+}
+mode: "mode?" {
+  shape: diamond
+}
+bash: "bash?" {
+  shape: diamond
+}
+allow: "bash, allowlisted?" {
+  shape: diamond
+}
+writes: "writes: Paths declared?\nall inside root, none protected or secret?" {
+  shape: diamond
+}
+
+run.class: run
+ask.class: ask
+refuse.class: refuse
+
+call -> all
+all -> run: yes
+all -> hosts: no
+hosts -> unlisted: yes
+unlisted -> refuse: "yes, read-only"
+unlisted -> ask: "yes, other modes"
+unlisted -> nofiles: no
+nofiles -> run: yes
+nofiles -> mode: no
+hosts -> ro: no
+ro -> secret: yes
+secret -> refuse: "yes, read-only"
+secret -> ask: "yes, other modes"
+secret -> run: no
+ro -> mode: no
+mode -> refuse: read-only
+mode -> allow: ask
+allow -> run: yes
+allow -> ask: no
+mode -> bash: auto
+bash -> run: yes
+bash -> writes: no
+writes -> run: yes
+writes -> ask: no

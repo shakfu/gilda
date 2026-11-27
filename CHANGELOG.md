@@ -1,8 +1,26 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+### Breaking
+
+Upgrading from 0.1.0: the first two change the CLI; the rest change the library API.
+
+- By default gilda asks before a write outside the working directory, under version-control metadata or to a secret, and before reading a secret. 0.1.0 ran every call. With no one to ask, as under `--json`, such a call is refused. `--permissions all` restores the old behaviour.
+
+- Renamed from gila to gilda: the binary, the module path (`github.com/shakfu/gilda`), the `GILDA_*` environment variables, and the `gilda` config, state and cache directories. Old names are not read. Move `~/.config/gila`, `~/.local/state/gila` and `~/.cache/gila` to their `gilda` paths to keep settings, history and saved models.
+
+- `permission.AskFunc` takes a `permission.Reason`, whose `Kind` says why the call asks. An app that remembers approvals needs it to avoid remembering one for a secret.
+
+- `agent.Config.Prices` is now an `agent.Pricer` interface rather than `*price.Catalog`, so `agent` no longer links the OpenRouter SDK, TOML or `state`, and an embedding app can supply its own prices. `*price.Catalog` implements it, so estimates are unchanged. Tasks call a `Pricer` from their own goroutines, so it must be safe for concurrent use.
+
+- A task's calls now go to its caller's `Approve`, whatever `TaskOptions.Build` returns. A `Build` that left `Approve` nil gave its tasks one that ran every call unasked, though they were documented to ask as the caller's do. `TaskOptions.OwnApproval` keeps `Build`'s instead, as does a caller with no `Approve`, so the copy never removes a check. Off by default, so the safe behaviour needs no setting; `app` and `examples/swarm` copied the caller's already, so they behave the same.
 
 ### Added
+
+- `--json` prints a `warning` record for each warning `-p` prints on stderr; it printed none. An untrusted `AGENTS.md` dropped such a run to `ask` mode with nobody to answer, so it refused every write and most of `bash` and still reported `complete`, with only `"permissions":"ask"` in the `result` record as a trace.
+
+- `docs/architecture.md`: the package layers, the tool loop, permission decisions, tasks and front ends, with d2 diagrams in `docs/media` laid out by TALA.
 
 - Background tasks. `task` with `background: true` returns an id at once and runs the subagent while the conversation goes on; `task_collect` reads finished answers, waits up to 600 s for one, or cancels. A subagent can start its own, so tasks nest, 2 deep by default, at most 4 running; `[tasks]` sets both and how the REPL delivers results. A task's answer reaches its parent only as `task_collect` output, so a subagent's text never carries the user's authority; the parent hears that a task finished through a notice in gilda's own words, appended to the next tool result or, when the REPL is idle, sent as a turn of its own. Tasks are goroutines under a context tree rather than processes, so cancelling a parent stops its subtree and a task answers only once its own tasks have. `-p` and ACP prompts end once their tasks do. In the REPL, Esc leaves background tasks running, `/tasks` lists or cancels them, and `/clear` and quitting cancel them. `[tasks] budget` bounds the tokens all tasks of a conversation use: each request reserves its input and output grant first, waits while others' reservations fill the budget, and goes out with the grant as its output cap; a task that finds the budget spent fails. Approvals from tasks now queue in the REPL, which showed one at a time and dropped the first when a second arrived. A `/permissions` change now reaches running tasks. `--task-model ID`, or `[tasks] model`, runs tasks on another model of the session's provider, so a strong conversation can delegate to a cheaper model; off by default. In `fan-out-delegate`, a Haiku root passed 19 of 27 runs, reading its tasks' "7 retries (8 attempts)" answers as attempts in the 8 it failed; a Sonnet root with Haiku tasks passed 6 of 6 at 35% of Sonnet's cost throughout. Tasks are not saved with the session; a resumed one starts its ids above those its history names. Three eval tasks measure it: `fan-out-research` (does a model fan out unasked), `fan-out-delegate` (can it, when asked: four tasks started and all collected) and `fan-out-slow` (does fanning out save time over 80 s of serial probes). Eval checks get `GILDA_RECORDS`, the run's `--json` records, so a check can test how a run worked. `scripts/eval` builds gilda from the source for each invocation instead of running `bin/gilda`, which could predate the code being measured; `-bin` still names a binary. Its "cost" column was the total over a task's runs while every other column was a mean; it is now per run, as its doc comment said. Design: `docs/dev/async-tasks.md`.
 
@@ -108,6 +126,8 @@
 
 ### Fixed
 
+- `scripts/eval`'s `TestAKilledRunCountsItsTurns` failed at random under load: the run's 1 s timeout counted from the fake binary's start, which could be killed before it printed. The test now expires the run once the fake has printed.
+
 - `a` at an approval for a network tool allowed every unlisted host for the rest of the session, since an allowance was keyed on tool and reason kind only. It now covers the hosts shown. A call naming several unlisted hosts lists them all; the prompt used to name only the first.
 
 - A trusted checkout that later pulled a changed `AGENTS.md` or skill was not asked about again, since trust was keyed on the path alone. `state.json` now keeps content hashes of those files and everything else in a skill's directory, and new content asks, so a checkout trusted before this change asks once. A set of hashes was chosen over one hash per checkout, so switching branches or working in a subdirectory asks only about content not yet approved. With no one to answer, as in a CI run with `-p`, a changed file means `ask` mode, so calls that need approval are refused; set `--permissions` explicitly there.
@@ -208,13 +228,17 @@
 
 ### Changed
 
+- `agent.TaskConfig` builds a task's config from its parent's, as `app.App` does, so an embedding app's `TaskOptions.Build` is one line. A nil `Build` now fails each `task` call with an error. It panicked outside any recover, ending the process.
+
+- `task`'s description names the tools from `TaskOptions.Tools`, rather than always saying "read and bash". An embedding app whose tasks get other tools told the model the wrong ones; without `Tools` it now gets a generic sentence. gilda's description is unchanged. An explicit option was chosen over reading the tools off a probe `Build` call, which gave the wrong answer for a `Build` that picks tools by model, and showed apps a call that was no task.
+
+- `task_collect` no longer shows a running task's latest call, which `/tasks` still shows. The label is built from the task's own arguments, so the caller read it in gilda's words rather than inside the task's answer.
+
+- `examples/swarm` is an embedding app in a module of its own. It works on a markdown brief: one agent per `##` part, all at once, then one agent that addresses the `#` objective from the parts' results. A failed part is marked in the synthesis prompt rather than ending the run, so the parts that finished are not wasted. A `depends: Survey, 3` line under a part makes it start only once those parts have finished, with their results in its prompt. A part waiting on others holds no `-parallel` slot, so a bound below the number of parts cannot deadlock. An unknown or ambiguous reference, a self-dependency or a cycle is refused. Headings in code fences are text; text before the `#`, a second `#`, or no `##` is refused. After a run it checks that tokens and cost add up across every agent, every background task finished, and `TaskEvent`s never nest. `make test` runs its offline tests; `make swarm` runs it on a provider, which needs a key, including once in `auto` mode on a temporary copy of the repository with each part asked for background tasks. In `read-only` mode, its default, it offers no `bash` and no `task`, which that mode refuses on every call, so agents do not spend turns on them. Refused calls are logged with the reason; the log showed only the call, as if it had run.
+
 - `--version` reports the module version, or a VCS pseudo-version for a local build, in place of a fixed `0.1.0`. `make build` still sets it from `git describe`.
 
 - The REPL status bar marks context use at 85% or more with `!` and a red background. Queued prompts are listed above the input, not only counted. Enter in a picker with no matches keeps it open.
-
-- `permission.AskFunc` takes a `permission.Reason`, whose `Kind` says why the call asks. An app that remembers approvals needs it to avoid remembering one for a secret.
-
-- By default gilda asks before a write outside the working directory, under version-control metadata or to a secret, and before reading a secret. 0.1.0 ran every call. With no one to ask, as under `--json`, such a call is refused. `--permissions all` restores the old behaviour.
 
 - `--json` `tool_call` and `tool_result` records carry a `label` field.
 
@@ -223,8 +247,6 @@
 - Tool lines in the REPL and on `-p`'s stderr start with `[tool] `, as in myra, so they stand apart from the answer when read without colour. They stay one line, cut at the label so the outcome remains.
 
 - `--help` wraps at 80 columns, or the terminal width if narrower, and names flag values (`--model ID`) in place of their Go types.
-
-- Renamed from gila to gilda: the binary, the module path (`github.com/shakfu/gilda`), the `GILDA_*` environment variables, and the `gilda` config, state and cache directories. Old names are not read. Move `~/.config/gila`, `~/.local/state/gila` and `~/.cache/gila` to their `gilda` paths to keep settings, history and saved models.
 
 ## 0.1.0
 

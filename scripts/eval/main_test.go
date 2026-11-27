@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -105,6 +106,29 @@ func fakeGilda(t *testing.T, out, then string) string {
 	return bin
 }
 
+// expiryCtx is a context that ends with DeadlineExceeded when expire is called, so a test can
+// time a run out at a point it chooses.
+type expiryCtx struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func expiring(parent context.Context) *expiryCtx {
+	return &expiryCtx{Context: parent, done: make(chan struct{})}
+}
+
+func (c *expiryCtx) expire()               { c.once.Do(func() { close(c.done) }) }
+func (c *expiryCtx) Done() <-chan struct{} { return c.done }
+func (c *expiryCtx) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
 // A run killed by the timeout still reports the turns and tokens it used, its subagent's included.
 // A task record inside a task is already in the outer one, so it is not added again.
 func TestAKilledRunCountsItsTurns(t *testing.T) {
@@ -113,9 +137,21 @@ func TestAKilledRunCountsItsTurns(t *testing.T) {
 {"type":"task","task":"t1","turns":1,"usage":{"input_tokens":40,"output_tokens":4}}
 {"type":"task","turns":3,"usage":{"input_tokens":50,"output_tokens":5,"cost":0.25}}
 {"type":"turn","usage":{"input_tokens":200,"output_tokens":20,"cost":null}}`
-	bin := fakeGilda(t, out, "exec sleep 30")
-	o := options{bin: bin, out: t.TempDir(), n: 1, timeout: time.Second}
-	results, err := runAll(context.Background(), tasks(t)[:1], o, io.Discard)
+	ready := filepath.Join(t.TempDir(), "ready")
+	bin := fakeGilda(t, out, "touch '"+ready+"'\nexec sleep 30")
+	// The run's own timeout counts from the start, so a loaded machine could kill the fake before
+	// it printed. The test expires the run once it has, as the timeout would.
+	ctx := expiring(context.Background())
+	go func() {
+		for start := time.Now(); time.Since(start) < time.Minute; time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(ready); err == nil {
+				break
+			}
+		}
+		ctx.expire()
+	}()
+	o := options{bin: bin, out: t.TempDir(), n: 1, timeout: 10 * time.Minute}
+	results, err := runAll(ctx, tasks(t)[:1], o, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

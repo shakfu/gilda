@@ -211,6 +211,23 @@ func TestCostIsEstimatedWhenTheProviderReportsNone(t *testing.T) {
 	}
 }
 
+type flatPricer float64
+
+func (f flatPricer) Cost(provider, model string, u llm.Usage) (float64, bool) {
+	return float64(f) * float64(u.Input+u.Output), provider == "mock" && model == "m"
+}
+
+func TestCostIsEstimatedByAnyPricer(t *testing.T) {
+	a, _, _ := newAgent(t, mock.Step{Text: "a", Usage: llm.Usage{Input: 1000, Output: 100}})
+	a.Prices = flatPricer(0.5)
+	if _, err := a.Run(context.Background(), "go", nil); err != nil {
+		t.Fatal(err)
+	}
+	if a.Usage.Cost == nil || *a.Usage.Cost != 550 || !a.Usage.Estimated {
+		t.Fatalf("cost %v, estimated %v; want 550, true", a.Usage.Cost, a.Usage.Estimated)
+	}
+}
+
 func equal(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

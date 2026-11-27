@@ -1,0 +1,50 @@
+vars: {
+  d2-config: {
+    layout-engine: tala
+  }
+}
+
+direction: down
+
+prompt: "Run(ctx, prompt, emit)\nappend user message"
+context: "manageContext\nelide at 70%, note at 85%"
+full: "return ErrContextFull" {
+  shape: oval
+}
+reserve: "Reserve\ntask budget, if set"
+stream: "Provider.Stream\nemit Text, Reasoning, ToolStart"
+cut: "stream ended early?\nresend, up to StreamRetries"
+usage: "price, add usage\nUsed = input + output"
+append: "append assistant message\nemit Response"
+calls: "tool calls?" {
+  shape: diamond
+}
+tools: "runTools, one call at a time" {
+  bind: "Binder: resolve target"
+  approve: "Approve: permission mode"
+  exec: "Run"
+  cap: "Cap at OutputCap"
+  bind -> approve -> exec -> cap
+}
+results: "append tool results\nplus task notice"
+done: "return Result" {
+  shape: oval
+}
+max: "return ErrMaxTurns" {
+  shape: oval
+}
+
+prompt -> context
+context -> full: "95% full"
+context -> reserve
+reserve -> stream
+stream -> cut: ErrIncomplete
+cut -> stream
+stream -> usage
+usage -> append
+append -> calls
+calls -> done: "no"
+calls -> tools: "yes"
+tools -> results
+results -> context: "next turn"
+results -> max: "MaxTurns reached"

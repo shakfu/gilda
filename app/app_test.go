@@ -851,3 +851,22 @@ func TestTaskModel(t *testing.T) {
 		t.Fatalf("another provider's model: %v", err)
 	}
 }
+
+// task's description names the tools build gives a task, in the wording the evals measured.
+func TestTaskDescriptionNamesReadAndBash(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "m.json"), []byte(`[{"text":"ok"}]`), 0o600)
+	a, err := New(Options{Mock: filepath.Join(root, "m.json"), Root: root, ConfigDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	task := tool.Find(a.Agent.Tools, "task")
+	if task == nil {
+		t.Fatal("no task tool")
+	}
+	if d := task.Spec().Description; !strings.Contains(d, "It has read and bash but no file-editing tools, and it knows nothing") {
+		t.Fatalf("description:\n%s", d)
+	}
+}
